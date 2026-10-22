@@ -1,0 +1,1 @@
+# Runtime: Home Assistant provides aiohttp etc.
