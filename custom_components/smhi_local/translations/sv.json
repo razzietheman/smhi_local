@@ -1,0 +1,28 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "SMHI Local",
+        "description": "Koordinater standardar till din Home Assistant-plats (zone.home).",
+        "data": {
+          "name": "Namn",
+          "latitude": "Latitud",
+          "longitude": "Longitud"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Denna plats är redan konfigurerad"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SMHI Local-alternativ",
+        "data": {
+          "update_interval": "Uppdateringsintervall (sekunder)"
+        }
+      }
+    }
+  }
+}

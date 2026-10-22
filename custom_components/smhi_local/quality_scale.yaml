@@ -1,0 +1,23 @@
+rules:
+  config_flow: done
+  entity_unique_id: done
+  has_entity_name: done
+  docs_installation_instructions: done
+  action_setup: todo
+  appropriate_polling: done
+  brands: todo
+  common_modules_brand_support: todo
+  config_entry_unloading: done
+  config_flow_test_coverage: todo
+  dependency_transparency: done
+  discovery: exempt
+  entity_unavailable: done
+  exception_translations: todo
+  icon_translations: todo
+  parallel_updates: todo
+  reauthentication_flow: exempt
+  reconfiguration_flow: todo
+  repair_issues: todo
+  runtime_data: done
+  test_before_setup: done
+  unique_config_entry: done
