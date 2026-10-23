@@ -1,5 +1,3 @@
-Här är en uppdaterad README som täcker hela integrationen inklusive 1.4.1:
-
 ```markdown
 # SMHI Local
 
