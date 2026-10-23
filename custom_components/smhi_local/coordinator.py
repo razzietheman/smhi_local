@@ -20,6 +20,7 @@ from .const import (
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_UPDATE_INTERVAL,
+    CONF_WARNING_AREA,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     FWI_INDEX_SV,
@@ -27,6 +28,8 @@ from .const import (
     PARAM_MAP,
     PCAT_LABELS,
     PRECIP_THRESHOLD_MM,
+    WARNING_AREA_ALL,
+    guess_county,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -880,15 +883,36 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         d["grassfire_sv"] = GRASSFIRE_SV.get(gf, f"Okänd ({gf})")
         return d
 
+    def _warning_area_filter(self) -> str | None:
+        """Configured or auto-detected län; None = show all."""
+        opt = self.entry.options.get(CONF_WARNING_AREA)
+        if opt is None:
+            opt = self.entry.data.get(CONF_WARNING_AREA)
+        if opt is not None and str(opt).strip().lower() in (
+            WARNING_AREA_ALL,
+            "*",
+            "alla",
+            "all",
+        ):
+            return None
+        if opt is not None and str(opt).strip():
+            return str(opt).strip()
+        # Auto from coordinates (e.g. Skövde → Västra Götalands län)
+        return guess_county(self.latitude, self.longitude)
+
     def warnings_bundle(self) -> dict[str, Any]:
-        """Summarise IBWW warnings (Sweden-wide list)."""
+        """Summarise IBWW warnings, filtered to home county when possible."""
         data = self.data or self._last_good or {}
         warnings = data.get("warnings") or []
+        area_filter = self._warning_area_filter()
+        filter_l = area_filter.lower() if area_filter else None
+
         if not warnings:
             return {
                 "warnings_count": 0,
                 "warnings_summary": "Inga aktiva varningar",
                 "warnings_list": [],
+                "filter_area": area_filter,
             }
 
         level_rank = {"RED": 4, "ORANGE": 3, "YELLOW": 2, "MESSAGE": 1}
@@ -899,10 +923,18 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             event = (w.get("event") or {}).get("sv") or (w.get("event") or {}).get("en") or "?"
             areas = w.get("warningAreas") or []
             for a in areas:
+                area = (a.get("areaName") or {}).get("sv") or "?"
+                affected = a.get("affectedAreas") or []
+                affected_names = " ".join(
+                    (x.get("sv") or x.get("en") or "") for x in affected if isinstance(x, dict)
+                )
+                if filter_l:
+                    hay = f"{area} {affected_names}".lower()
+                    if filter_l not in hay:
+                        continue
                 lvl = a.get("warningLevel") or {}
                 code = lvl.get("code") or "MESSAGE"
                 label = lvl.get("sv") or lvl.get("en") or code
-                area = (a.get("areaName") or {}).get("sv") or "?"
                 rank = level_rank.get(code, 0)
                 if rank > max_rank:
                     max_rank = rank
@@ -918,16 +950,23 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
 
         count = len(items)
-        # short summary
+        if count == 0:
+            where = f" i {area_filter}" if area_filter else ""
+            return {
+                "warnings_count": 0,
+                "warnings_summary": f"Inga aktiva varningar{where}",
+                "warnings_list": [],
+                "filter_area": area_filter,
+            }
+
         top = items[:3]
         bits = [f"{i['level']}: {i['event']} ({i['area']})" for i in top]
         extra = f" · +{count - 3} till" if count > 3 else ""
-        summary = f"{count} aktiva · {max_label}"
-        if bits:
-            summary = f"{count} aktiva · " + " · ".join(bits) + extra
+        summary = f"{count} aktiva · " + " · ".join(bits) + extra
 
         return {
             "warnings_count": count,
             "warnings_summary": summary,
             "warnings_list": items,
+            "filter_area": area_filter,
         }

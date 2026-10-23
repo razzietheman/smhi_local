@@ -20,7 +20,8 @@
       "init": {
         "title": "SMHI Local options",
         "data": {
-          "update_interval": "Update interval (seconds)"
+          "update_interval": "Update interval (seconds)",
+          "warning_area": "Warning area (county, e.g. Västra Götalands län). Empty = auto from coordinates. Use 'all' for entire Sweden."
         }
       }
     }

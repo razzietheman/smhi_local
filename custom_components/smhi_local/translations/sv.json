@@ -20,7 +20,8 @@
       "init": {
         "title": "SMHI Local-alternativ",
         "data": {
-          "update_interval": "Uppdateringsintervall (sekunder)"
+          "update_interval": "Uppdateringsintervall (sekunder)",
+          "warning_area": "Varningsområde (län, t.ex. Västra Götalands län). Tomt = auto från koordinater. Skriv all för hela Sverige."
         }
       }
     }

@@ -7,6 +7,8 @@ CONF_LATITUDE = "latitude"
 CONF_LONGITUDE = "longitude"
 CONF_NAME = "name"
 CONF_UPDATE_INTERVAL = "update_interval"
+CONF_WARNING_AREA = "warning_area"
+WARNING_AREA_ALL = "all"  # show all counties
 
 DEFAULT_NAME = "SMHI"
 DEFAULT_UPDATE_INTERVAL = 300  # seconds
@@ -524,3 +526,38 @@ WARNING_SENSOR_TYPES: tuple[dict, ...] = (
         "icon": "mdi:counter",
     },
 )
+
+
+# Approximate län bounding boxes (lat_min, lat_max, lon_min, lon_max) for auto warning filter
+# Rough boxes – good enough to pick home county from HA coordinates
+COUNTY_BOXES: tuple[tuple[str, float, float, float, float], ...] = (
+    ("Skåne län", 55.3, 56.5, 12.5, 14.6),
+    ("Blekinge län", 56.0, 56.5, 14.5, 16.0),
+    ("Hallands län", 56.3, 57.6, 11.8, 13.5),
+    ("Kronobergs län", 56.4, 57.3, 13.5, 15.5),
+    ("Kalmar län", 56.2, 58.1, 15.3, 17.2),
+    ("Gotlands län", 56.9, 58.0, 18.0, 19.5),
+    ("Jönköpings län", 56.9, 58.2, 13.3, 15.4),
+    ("Östergötlands län", 57.7, 58.9, 14.7, 17.0),
+    ("Västra Götalands län", 57.2, 59.4, 10.9, 14.7),
+    ("Värmlands län", 58.7, 61.0, 11.7, 14.6),
+    ("Örebro län", 58.7, 60.1, 14.3, 15.9),
+    ("Södermanlands län", 58.7, 59.6, 15.6, 17.6),
+    ("Stockholms län", 58.7, 60.3, 17.2, 19.4),
+    ("Uppsala län", 59.4, 60.7, 16.7, 18.8),
+    ("Västmanlands län", 59.2, 60.3, 15.5, 17.0),
+    ("Dalarnas län", 60.0, 62.3, 12.5, 16.5),
+    ("Gävleborgs län", 60.3, 62.3, 15.3, 17.8),
+    ("Västernorrlands län", 62.0, 64.0, 15.5, 19.5),
+    ("Jämtlands län", 61.5, 65.0, 12.0, 16.5),
+    ("Västerbottens län", 63.5, 66.5, 15.0, 22.0),
+    ("Norrbottens län", 65.0, 69.1, 16.0, 25.0),
+)
+
+
+def guess_county(lat: float, lon: float) -> str | None:
+    """Best-effort län from coordinates (first matching box)."""
+    for name, la0, la1, lo0, lo1 in COUNTY_BOXES:
+        if la0 <= lat <= la1 and lo0 <= lon <= lo1:
+            return name
+    return None
