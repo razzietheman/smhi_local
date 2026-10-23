@@ -1,6 +1,6 @@
-```markdown
 # SMHI Local
 
+[![Open your Home Assistant instance and repository inside a hacs repository.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=razzietheman&repository=smhi_local&category=integration)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -48,7 +48,7 @@ En config entry (lat/lon) → en enhet i HA med weather + alla sensorer. Uppdate
 ## Installation
 
 ### HACS (rekommenderas)
-1. HACS → Integrations → ⋮ → *Custom repositories*
+1. Klicka på knappen högst upp för att öppna direkt i HACS, eller gör det manuellt: HACS → Integrations → ⋮ → *Custom repositories*
 2. URL till repot, kategori **Integration**
 3. Installera **SMHI Local** → starta om HA
 4. *Inställningar → Enheter och tjänster → Lägg till integration → SMHI Local*
@@ -309,4 +309,3 @@ Ingen autentisering. Villkor: [SMHI Open Data](https://opendata.smhi.se).
 MIT – se [LICENSE](LICENSE).  
 Prognos-, brandrisk- och varningsdata tillhör SMHI.  
 Integrationen: **SMHI Open Data Powered by Rasmus**.
-```
