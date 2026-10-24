@@ -1,4 +1,3 @@
-```markdown
 # SMHI Local
 
 [![Open your Home Assistant instance and repository inside a hacs repository.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=razzietheman&repository=smhi_local&category=integration)
@@ -316,4 +315,3 @@ Ingen autentisering. Villkor: [SMHI Open Data](https://opendata.smhi.se).
 MIT – se [LICENSE](LICENSE).  
 Prognos-, brandrisk-, varnings- och observationsdata tillhör SMHI.  
 Integrationen: **SMHI Open Data Powered by Rasmus**.
-```
