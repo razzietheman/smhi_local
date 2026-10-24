@@ -501,6 +501,57 @@ def _visibility_text(vis: float, iso: str) -> str:
     return f"{label} ({vis_s} km), {_format_datum_kl(iso)}"
 
 
+
+def _point_in_ring(lon: float, lat: float, ring: list) -> bool:
+    """Ray-casting point-in-polygon for one linear ring [[lon, lat], ...]."""
+    n = len(ring)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        try:
+            xi, yi = float(ring[i][0]), float(ring[i][1])
+            xj, yj = float(ring[j][0]), float(ring[j][1])
+        except (TypeError, ValueError, IndexError):
+            j = i
+            continue
+        if ((yi > lat) != (yj > lat)) and (
+            lon < (xj - xi) * (lat - yi) / ((yj - yi) or 1e-30) + xi
+        ):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _point_in_geometry(lon: float, lat: float, geom: dict | None) -> bool:
+    """True if (lon, lat) lies inside GeoJSON Polygon or MultiPolygon (EPSG:4326)."""
+    if not geom or not isinstance(geom, dict):
+        return False
+    gtype = geom.get("type")
+    coords = geom.get("coordinates") or []
+    if gtype == "Polygon":
+        if not coords or not coords[0]:
+            return False
+        if not _point_in_ring(lon, lat, coords[0]):
+            return False
+        # holes
+        for hole in coords[1:]:
+            if hole and _point_in_ring(lon, lat, hole):
+                return False
+        return True
+    if gtype == "MultiPolygon":
+        for poly in coords:
+            if not poly or not poly[0]:
+                continue
+            if _point_in_ring(lon, lat, poly[0]):
+                if any(_point_in_ring(lon, lat, h) for h in poly[1:] if h):
+                    continue
+                return True
+        return False
+    return False
+
+
 class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Fetch SMHI forecast; keep last good timeSeries on failure."""
 
@@ -884,7 +935,7 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return d
 
     def _warning_area_filter(self) -> str | None:
-        """Configured or auto-detected län; None = show all."""
+        """Optional name filter. None = geometry-only (default). 'all' = no filter."""
         opt = self.entry.options.get(CONF_WARNING_AREA)
         if opt is None:
             opt = self.entry.data.get(CONF_WARNING_AREA)
@@ -894,44 +945,73 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "alla",
             "all",
         ):
-            return None
+            return WARNING_AREA_ALL
         if opt is not None and str(opt).strip():
             return str(opt).strip()
-        # Auto from coordinates (e.g. Skövde → Västra Götalands län)
-        return guess_county(self.latitude, self.longitude)
+        return None
 
     def warnings_bundle(self) -> dict[str, Any]:
-        """Summarise IBWW warnings, filtered to home county when possible."""
+        """IBWW warnings relevant to the configured point (polygon test).
+
+        Default: only warning areas whose GeoJSON polygon contains lat/lon.
+        Option warning_area=all: every active warning in Sweden.
+        Option warning_area=<name>: geometry hit OR name match (legacy).
+        """
         data = self.data or self._last_good or {}
         warnings = data.get("warnings") or []
-        area_filter = self._warning_area_filter()
-        filter_l = area_filter.lower() if area_filter else None
+        area_opt = self._warning_area_filter()
+        show_all = area_opt == WARNING_AREA_ALL
+        name_filter = None if show_all or area_opt is None else area_opt.lower()
+        lon = float(self.longitude)
+        lat = float(self.latitude)
 
         if not warnings:
             return {
                 "warnings_count": 0,
                 "warnings_summary": "Inga aktiva varningar",
                 "warnings_list": [],
-                "filter_area": area_filter,
+                "filter_area": "geometry" if not show_all else "all",
+                "filter_mode": "all" if show_all else "point_in_polygon",
             }
 
         level_rank = {"RED": 4, "ORANGE": 3, "YELLOW": 2, "MESSAGE": 1}
-        items = []
+        items: list[dict[str, Any]] = []
         max_rank = 0
         max_label = "Meddelande"
+
         for w in warnings:
-            event = (w.get("event") or {}).get("sv") or (w.get("event") or {}).get("en") or "?"
-            areas = w.get("warningAreas") or []
-            for a in areas:
-                area = (a.get("areaName") or {}).get("sv") or "?"
+            event = (
+                (w.get("event") or {}).get("sv")
+                or (w.get("event") or {}).get("en")
+                or "?"
+            )
+            for a in w.get("warningAreas") or []:
+                area_name = (a.get("areaName") or {}).get("sv") or "?"
                 affected = a.get("affectedAreas") or []
                 affected_names = " ".join(
-                    (x.get("sv") or x.get("en") or "") for x in affected if isinstance(x, dict)
+                    (x.get("sv") or x.get("en") or "")
+                    for x in affected
+                    if isinstance(x, dict)
                 )
-                if filter_l:
-                    hay = f"{area} {affected_names}".lower()
-                    if filter_l not in hay:
-                        continue
+                geom = (a.get("area") or {}).get("geometry")
+
+                if not show_all:
+                    inside = _point_in_geometry(lon, lat, geom) if geom else False
+                    if geom:
+                        if not inside:
+                            continue
+                    else:
+                        # No polygon – optional name fallback only
+                        if name_filter:
+                            hay = f"{area_name} {affected_names}".lower()
+                            if name_filter not in hay:
+                                continue
+                        else:
+                            # Strict geometry mode without polygon: skip
+                            continue
+                    # If name_filter set together with geometry: already inside; keep
+                # show_all: keep every area
+
                 lvl = a.get("warningLevel") or {}
                 code = lvl.get("code") or "MESSAGE"
                 label = lvl.get("sv") or lvl.get("en") or code
@@ -944,19 +1024,21 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "event": event,
                         "level": label,
                         "level_code": code,
-                        "area": area,
+                        "area": area_name,
                         "id": a.get("id"),
+                        "in_polygon": bool(geom and _point_in_geometry(lon, lat, geom)),
                     }
                 )
 
         count = len(items)
+        mode = "all" if show_all else "point_in_polygon"
         if count == 0:
-            where = f" i {area_filter}" if area_filter else ""
             return {
                 "warnings_count": 0,
-                "warnings_summary": f"Inga aktiva varningar{where}",
+                "warnings_summary": "Inga aktiva varningar för din plats",
                 "warnings_list": [],
-                "filter_area": area_filter,
+                "filter_area": area_opt or "geometry",
+                "filter_mode": mode,
             }
 
         top = items[:3]
@@ -968,5 +1050,6 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "warnings_count": count,
             "warnings_summary": summary,
             "warnings_list": items,
-            "filter_area": area_filter,
+            "filter_area": area_opt or "geometry",
+            "filter_mode": mode,
         }

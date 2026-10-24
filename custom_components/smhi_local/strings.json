@@ -21,7 +21,7 @@
         "title": "SMHI Local options",
         "data": {
           "update_interval": "Update interval (seconds)",
-          "warning_area": "Varningsområde (län, t.ex. Västra Götalands län). Tomt = auto från koordinater. Skriv all för hela Sverige."
+          "warning_area": "Varningsfilter: tomt = bara varningar vars polygon täcker din lat/lon. Skriv all för hela Sverige. (Länsnamn används bara om polygon saknas.)"
         }
       }
     }
