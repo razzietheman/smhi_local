@@ -17,6 +17,8 @@ from .const import (
     CONF_ENABLE_WATER,
     CONF_WATER_SOURCE,
     CONF_WATER_STATION_ID,
+    CONF_ENABLE_ICE,
+    CONF_ICE_STATION_ID,
     DEFAULT_NAME,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
@@ -64,6 +66,8 @@ class SmhiLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_ENABLE_WATER: False,
                     CONF_WATER_SOURCE: WATER_SOURCE_AUTO,
                     CONF_WATER_STATION_ID: "",
+                    CONF_ENABLE_ICE: False,
+                    CONF_ICE_STATION_ID: "",
                 },
             )
 
@@ -134,6 +138,14 @@ class SmhiLocalOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_WATER_STATION_ID,
                         default=current.get(CONF_WATER_STATION_ID, ""),
+                    ): str,
+                    vol.Optional(
+                        CONF_ENABLE_ICE,
+                        default=current.get(CONF_ENABLE_ICE, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_ICE_STATION_ID,
+                        default=current.get(CONF_ICE_STATION_ID, ""),
                     ): str,
                 }
             ),

@@ -12,6 +12,8 @@ WARNING_AREA_ALL = "all"  # show all counties
 CONF_ENABLE_WATER = "enable_water_data"
 CONF_WATER_SOURCE = "water_source"
 CONF_WATER_STATION_ID = "water_station_id"
+CONF_ENABLE_ICE = "enable_ice_data"
+CONF_ICE_STATION_ID = "ice_station_id"
 WATER_SOURCE_OFF = "off"
 WATER_SOURCE_HYDRO = "hydro"
 WATER_SOURCE_OCEAN = "ocean"
@@ -615,5 +617,48 @@ WATER_SENSOR_TYPES: tuple[dict, ...] = (
         "device_class": "distance",
         "state_class": "measurement",
         "icon": "mdi:map-marker-distance",
+    },
+)
+
+ICE_SENSOR_TYPES: tuple[dict, ...] = (
+    {
+        "key": "ice_thickness",
+        "name": "Istjocklek",
+        "unit": "cm",
+        "device_class": None,
+        "state_class": "measurement",
+        "icon": "mdi:snowflake-thermometer",
+    },
+    {
+        "key": "ice_station",
+        "name": "Isstation",
+        "unit": None,
+        "device_class": None,
+        "state_class": None,
+        "icon": "mdi:map-marker",
+    },
+    {
+        "key": "ice_station_distance",
+        "name": "Avstånd till isstation",
+        "unit": "km",
+        "device_class": "distance",
+        "state_class": "measurement",
+        "icon": "mdi:map-marker-distance",
+    },
+    {
+        "key": "ice_observed_at",
+        "name": "Is observationstid",
+        "unit": None,
+        "device_class": None,
+        "state_class": None,
+        "icon": "mdi:clock-outline",
+    },
+    {
+        "key": "ice_status",
+        "name": "Isstatus",
+        "unit": None,
+        "device_class": None,
+        "state_class": None,
+        "icon": "mdi:ice-cream",
     },
 )

@@ -25,6 +25,8 @@ from .const import (
     CONF_ENABLE_WATER,
     CONF_WATER_SOURCE,
     CONF_WATER_STATION_ID,
+    CONF_ENABLE_ICE,
+    CONF_ICE_STATION_ID,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     FWI_INDEX_SV,
@@ -621,20 +623,27 @@ async def _obs_nearest_station(
 
 
 async def _obs_latest_value(
-    session: ClientSession, base: str, parameter: int, station_key: str
-) -> float | None:
-    """Fetch latest numeric value for station/parameter."""
-    # Prefer live periods
+    session: ClientSession,
+    base: str,
+    parameter: int,
+    station_key: str,
+    *,
+    allow_archive: bool = False,
+) -> tuple[float | None, int | None]:
+    """Fetch latest numeric value (+ optional unix ms date) for station/parameter."""
     st_url = f"{base}/parameter/{parameter}/station/{station_key}.json"
     try:
         async with session.get(st_url, timeout=20) as resp:
             if resp.status != 200:
-                return None
+                return None, None
             st = await resp.json()
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
     periods = [p.get("key") for p in (st.get("period") or []) if p.get("key")]
-    for period in ("latest-hour", "latest-day", "latest-months"):
+    order = ["latest-hour", "latest-day", "latest-months"]
+    if allow_archive:
+        order.append("corrected-archive")
+    for period in order:
         if period not in periods:
             continue
         data_url = (
@@ -642,7 +651,7 @@ async def _obs_latest_value(
             f"/period/{period}/data.json"
         )
         try:
-            async with session.get(data_url, timeout=20) as resp:
+            async with session.get(data_url, timeout=30) as resp:
                 if resp.status != 200:
                     continue
                 payload = await resp.json()
@@ -653,10 +662,16 @@ async def _obs_latest_value(
             continue
         last = values[-1]
         try:
-            return float(last.get("value"))
+            val = float(last.get("value"))
         except (TypeError, ValueError):
             continue
-    return None
+        date_ms = last.get("date")
+        try:
+            date_ms = int(date_ms) if date_ms is not None else None
+        except (TypeError, ValueError):
+            date_ms = None
+        return val, date_ms
+    return None, None
 
 
 class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -985,30 +1000,48 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # --- Water observations (optional hydroobs / ocobs) ---
         result["water"] = None
-        enable_water = bool(
-            self.entry.options.get(CONF_ENABLE_WATER, False)
-        )
+        water_ok = False
+        enable_water = bool(self.entry.options.get(CONF_ENABLE_WATER, False))
         water_source = self.entry.options.get(CONF_WATER_SOURCE, WATER_SOURCE_AUTO)
         manual_id = str(self.entry.options.get(CONF_WATER_STATION_ID) or "").strip() or None
         if enable_water and water_source != WATER_SOURCE_OFF:
             try:
-                result["water"] = await self._async_fetch_water(
+                water = await self._async_fetch_water(
                     lat, lon, water_source, manual_id
                 )
+                result["water"] = water
+                water_ok = water is not None
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("SMHI water observations failed")
 
+        # --- Ice observations (hydroobs param 7, seasonal) ---
+        result["ice"] = None
+        ice_ok = False
+        enable_ice = bool(self.entry.options.get(CONF_ENABLE_ICE, False))
+        ice_manual = str(self.entry.options.get(CONF_ICE_STATION_ID) or "").strip() or None
+        if enable_ice:
+            try:
+                ice = await self._async_fetch_ice(lat, lon, ice_manual)
+                result["ice"] = ice
+                ice_ok = ice is not None
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("SMHI ice observations failed")
+
+        # --- Cache: all successful layers live in _last_good ---
         if snow_ok:
             self._last_good = result
             return result
 
         if self._last_good:
-            # merge newer fire/warnings onto last good snow if available
             merged = dict(self._last_good)
             if fire_ok:
                 merged["fire"] = result["fire"]
             if warn_ok:
                 merged["warnings"] = result["warnings"]
+            if water_ok and result.get("water") is not None:
+                merged["water"] = result["water"]
+            if ice_ok and result.get("ice") is not None:
+                merged["ice"] = result["ice"]
             merged["fetched_at"] = result["fetched_at"]
             self._last_good = merged
             return merged
@@ -1201,15 +1234,15 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not st:
                 return {}
             key = str(st.get("key"))
-            level = await _obs_latest_value(self.session, HYDRO_BASE, 3, key)
+            level, _ = await _obs_latest_value(self.session, HYDRO_BASE, 3, key)
             # temperature may use different station – try same id first then nearest
-            temp = await _obs_latest_value(self.session, HYDRO_BASE, 4, key)
+            temp, _ = await _obs_latest_value(self.session, HYDRO_BASE, 4, key)
             if temp is None:
                 st_t = await _obs_nearest_station(
                     self.session, HYDRO_BASE, 4, lat, lon, None
                 )
                 if st_t:
-                    temp = await _obs_latest_value(
+                    temp, _ = await _obs_latest_value(
                         self.session, HYDRO_BASE, 4, str(st_t.get("key"))
                     )
             return {
@@ -1234,23 +1267,23 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not st:
                 return {}
             key = str(st.get("key"))
-            level = await _obs_latest_value(self.session, OCEAN_BASE, 6, key)
-            temp = await _obs_latest_value(self.session, OCEAN_BASE, 5, key)
+            level, _ = await _obs_latest_value(self.session, OCEAN_BASE, 6, key)
+            temp, _ = await _obs_latest_value(self.session, OCEAN_BASE, 5, key)
             if temp is None:
                 st_t = await _obs_nearest_station(
                     self.session, OCEAN_BASE, 5, lat, lon, None
                 )
                 if st_t:
-                    temp = await _obs_latest_value(
+                    temp, _ = await _obs_latest_value(
                         self.session, OCEAN_BASE, 5, str(st_t.get("key"))
                     )
-            wave = await _obs_latest_value(self.session, OCEAN_BASE, 1, key)
+            wave, _ = await _obs_latest_value(self.session, OCEAN_BASE, 1, key)
             if wave is None:
                 st_w = await _obs_nearest_station(
                     self.session, OCEAN_BASE, 1, lat, lon, None
                 )
                 if st_w:
-                    wave = await _obs_latest_value(
+                    wave, _ = await _obs_latest_value(
                         self.session, OCEAN_BASE, 1, str(st_w.get("key"))
                     )
             return {
@@ -1285,4 +1318,54 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Latest water observation fields for sensors."""
         data = self.data or self._last_good or {}
         return dict(data.get("water") or {})
+
+    async def _async_fetch_ice(
+        self, lat: float, lon: float, manual_id: str | None
+    ) -> dict[str, Any]:
+        """Ice thickness from hydroobs (param 7); seasonal archive data."""
+        out: dict[str, Any] = {
+            "ice_thickness": None,
+            "ice_station": None,
+            "ice_station_distance": None,
+            "ice_observed_at": None,
+            "ice_status": "Ingen isdata",
+            "station_id": None,
+        }
+        st = await _obs_nearest_station(
+            self.session, HYDRO_BASE, 7, lat, lon, manual_id
+        )
+        if not st:
+            return out
+        key = str(st.get("key"))
+        thickness, date_ms = await _obs_latest_value(
+            self.session, HYDRO_BASE, 7, key, allow_archive=True
+        )
+        out["water_station"] = None  # noqa: keep keys stable
+        out["ice_station"] = st.get("name") or key
+        out["ice_station_distance"] = st.get("_distance_km")
+        out["station_id"] = key
+        out["ice_thickness"] = thickness
+        if date_ms:
+            try:
+                from homeassistant.util import dt as dt_util
+                observed = dt_util.utc_from_timestamp(date_ms / 1000.0)
+                local = dt_util.as_local(observed)
+                out["ice_observed_at"] = local.strftime("%Y-%m-%d %H:%M")
+                age_days = (dt_util.utcnow() - observed).total_seconds() / 86400
+                if thickness is not None and age_days <= 120:
+                    out["ice_status"] = f"Istjocklek {thickness:g} cm"
+                elif thickness is not None:
+                    out["ice_status"] = f"Senaste mätning {out['ice_observed_at']} ({thickness:g} cm)"
+                else:
+                    out["ice_status"] = "Ingen aktuell isdata"
+            except Exception:  # noqa: BLE001
+                out["ice_observed_at"] = str(date_ms)
+                out["ice_status"] = "Isdata tillgänglig"
+        elif thickness is not None:
+            out["ice_status"] = f"Istjocklek {thickness:g} cm"
+        return out
+
+    def ice_bundle(self) -> dict[str, Any]:
+        data = self.data or self._last_good or {}
+        return dict(data.get("ice") or {})
 

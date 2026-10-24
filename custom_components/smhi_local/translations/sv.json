@@ -24,15 +24,19 @@
           "warning_area": "Varningsområde",
           "enable_water_data": "Aktivera hav- och sjödata",
           "water_source": "Typ av vattenstation",
-          "water_station_id": "Manuellt stations-ID"
+          "water_station_id": "Manuellt stations-ID",
+          "enable_ice_data": "Aktivera isinformation",
+          "ice_station_id": "Manuellt isstations-ID"
         },
-        "description": "Uppdateringsintervall, varningsfilter och valfri hav-/sjödata.",
+        "description": "Uppdateringsintervall, varningsfilter, hav/sjö och isdata.",
         "data_description": {
           "update_interval": "Hur ofta prognos, brandrisk och varningar hämtas (60–3600).",
           "warning_area": "Lämna tomt för punkt-i-polygon (bara varningar vars zon täcker din lat/lon). Skriv all för hela Sverige.",
           "enable_water_data": "Hämtar närmaste hydro- eller oceanstation från SMHI.",
           "water_source": "hydro = sjö/vattendrag, ocean = hav, auto = närmaste av de två.",
-          "water_station_id": "Valfritt. Lämna tomt för automatiskt närmaste station."
+          "water_station_id": "Valfritt. Lämna tomt för automatiskt närmaste station.",
+          "enable_ice_data": "Hämtar istjocklek m.m. från hydroobs (säsongsdata – kan saknas på sommaren).",
+          "ice_station_id": "Valfritt. Tomt = närmaste station med istjocklek."
         }
       }
     }

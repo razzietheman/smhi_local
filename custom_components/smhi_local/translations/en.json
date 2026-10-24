@@ -24,15 +24,19 @@
           "warning_area": "Warning area",
           "enable_water_data": "Enable ocean/lake data",
           "water_source": "Water station type",
-          "water_station_id": "Manual station ID"
+          "water_station_id": "Manual station ID",
+          "enable_ice_data": "Enable ice data",
+          "ice_station_id": "Manual ice station ID"
         },
-        "description": "Update interval, warning filter and optional water data.",
+        "description": "Update interval, warning filter, water and ice data.",
         "data_description": {
           "update_interval": "How often forecast, fire and warnings are polled (60–3600).",
           "warning_area": "Leave empty for point-in-polygon (only zones covering your lat/lon). Use all for entire Sweden.",
           "enable_water_data": "Fetch nearest hydro or ocean station from SMHI.",
           "water_source": "hydro = lake/river, ocean = sea, auto = whichever is closer.",
-          "water_station_id": "Optional. Leave empty to auto-pick nearest station."
+          "water_station_id": "Optional. Leave empty to auto-pick nearest station.",
+          "enable_ice_data": "Fetch ice thickness etc. from hydroobs (seasonal – may be empty in summer).",
+          "ice_station_id": "Optional. Empty = nearest ice-thickness station."
         }
       }
     }

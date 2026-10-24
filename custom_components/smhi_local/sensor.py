@@ -24,6 +24,7 @@ from .const import (
     SENSOR_TYPES,
     WARNING_SENSOR_TYPES,
     WATER_SENSOR_TYPES,
+    ICE_SENSOR_TYPES,
 )
 from .coordinator import SmhiLocalCoordinator
 
@@ -71,6 +72,10 @@ async def async_setup_entry(
     entities.extend(
         SmhiWaterSensor(coordinator, entry, name, desc)
         for desc in WATER_SENSOR_TYPES
+    )
+    entities.extend(
+        SmhiIceSensor(coordinator, entry, name, desc)
+        for desc in ICE_SENSOR_TYPES
     )
     entities.append(SmhiCurrentSensor(coordinator, entry, name))
     async_add_entities(entities)
@@ -394,3 +399,44 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     def available(self) -> bool:
         # Available when coordinator is ok; value may still be None if water disabled
         return super().available
+
+
+class SmhiIceSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+    """Optional ice observation sensors (hydroobs, seasonal)."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: SmhiLocalCoordinator,
+        entry: ConfigEntry,
+        device_name: str,
+        desc: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator)
+        self._key = desc["key"]
+        self._attr_name = desc["name"]
+        self._attr_unique_id = f"{entry.entry_id}_ice_{self._key}"
+        self._attr_native_unit_of_measurement = desc.get("unit")
+        self._attr_icon = desc.get("icon")
+        dc = desc.get("device_class")
+        self._attr_device_class = _DEVICE_CLASS_MAP.get(dc) if dc else None
+        sc = desc.get("state_class")
+        self._attr_state_class = _STATE_CLASS_MAP.get(sc) if sc else None
+        self._attr_device_info = _device_info(entry, device_name)
+
+    @property
+    def native_value(self) -> float | int | str | None:
+        bundle = self.coordinator.ice_bundle()
+        if not bundle:
+            return None
+        val = bundle.get(self._key)
+        if val is None:
+            return None
+        if self._key in ("ice_station", "ice_observed_at", "ice_status"):
+            return val
+        try:
+            f = float(val)
+            return round(f, 1) if not float(f).is_integer() else int(f)
+        except (TypeError, ValueError):
+            return val
