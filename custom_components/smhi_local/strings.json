@@ -18,10 +18,21 @@
   "options": {
     "step": {
       "init": {
-        "title": "SMHI Local options",
+        "title": "Alternativ",
         "data": {
-          "update_interval": "Update interval (seconds)",
-          "warning_area": "Varningsfilter: tomt = bara varningar vars polygon täcker din lat/lon. Skriv all för hela Sverige. (Länsnamn används bara om polygon saknas.)"
+          "update_interval": "Uppdateringsintervall (sekunder)",
+          "warning_area": "Varningsområde",
+          "enable_water_data": "Aktivera hav- och sjödata",
+          "water_source": "Typ av vattenstation",
+          "water_station_id": "Manuellt stations-ID"
+        },
+        "description": "Uppdateringsintervall, varningsfilter och valfri hav-/sjödata.",
+        "data_description": {
+          "update_interval": "Hur ofta prognos, brandrisk och varningar hämtas (60–3600).",
+          "warning_area": "Lämna tomt för punkt-i-polygon (bara varningar vars zon täcker din lat/lon). Skriv all för hela Sverige.",
+          "enable_water_data": "Hämtar närmaste hydro- eller oceanstation från SMHI.",
+          "water_source": "hydro = sjö/vattendrag, ocean = hav, auto = närmaste av de två.",
+          "water_station_id": "Valfritt. Lämna tomt för automatiskt närmaste station."
         }
       }
     }

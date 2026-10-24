@@ -14,10 +14,17 @@ from homeassistant.helpers import config_validation as cv
 from .const import (
     CONF_UPDATE_INTERVAL,
     CONF_WARNING_AREA,
+    CONF_ENABLE_WATER,
+    CONF_WATER_SOURCE,
+    CONF_WATER_STATION_ID,
     DEFAULT_NAME,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     WARNING_AREA_ALL,
+    WATER_SOURCE_AUTO,
+    WATER_SOURCE_HYDRO,
+    WATER_SOURCE_OCEAN,
+    WATER_SOURCE_OFF,
     guess_county,
 )
 
@@ -44,7 +51,6 @@ class SmhiLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.async_set_unique_id(f"smhi_{round(lat, 3)}_{round(lon, 3)}")
             self._abort_if_unique_id_configured()
 
-            auto_area = guess_county(float(lat), float(lon)) or ""
             return self.async_create_entry(
                 title=name,
                 data={
@@ -54,7 +60,10 @@ class SmhiLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 },
                 options={
                     CONF_UPDATE_INTERVAL: DEFAULT_UPDATE_INTERVAL,
-                    CONF_WARNING_AREA: auto_area,
+                    CONF_WARNING_AREA: "",  # point-in-polygon
+                    CONF_ENABLE_WATER: False,
+                    CONF_WATER_SOURCE: WATER_SOURCE_AUTO,
+                    CONF_WATER_STATION_ID: "",
                 },
             )
 
@@ -91,10 +100,8 @@ class SmhiLocalOptionsFlow(config_entries.OptionsFlow):
 
         current = self.config_entry.options
         data = self.config_entry.data
-        auto = guess_county(
-            float(data.get(CONF_LATITUDE, 0)),
-            float(data.get(CONF_LONGITUDE, 0)),
-        ) or ""
+        # Prefer empty warning filter (geometry mode) if previously set to a county
+        warn_default = current.get(CONF_WARNING_AREA, "")
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -107,7 +114,26 @@ class SmhiLocalOptionsFlow(config_entries.OptionsFlow):
                     ): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
                     vol.Optional(
                         CONF_WARNING_AREA,
-                        default=current.get(CONF_WARNING_AREA, auto),
+                        default=warn_default if warn_default is not None else "",
+                    ): str,
+                    vol.Optional(
+                        CONF_ENABLE_WATER,
+                        default=current.get(CONF_ENABLE_WATER, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_WATER_SOURCE,
+                        default=current.get(CONF_WATER_SOURCE, WATER_SOURCE_AUTO),
+                    ): vol.In(
+                        {
+                            WATER_SOURCE_AUTO: "Auto (närmaste)",
+                            WATER_SOURCE_HYDRO: "Sjö / vattendrag (hydroobs)",
+                            WATER_SOURCE_OCEAN: "Hav (ocobs)",
+                            WATER_SOURCE_OFF: "Av",
+                        }
+                    ),
+                    vol.Optional(
+                        CONF_WATER_STATION_ID,
+                        default=current.get(CONF_WATER_STATION_ID, ""),
                     ): str,
                 }
             ),

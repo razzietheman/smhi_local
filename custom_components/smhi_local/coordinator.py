@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import math
 import logging
 from typing import Any
 
@@ -21,6 +22,9 @@ from .const import (
     CONF_LONGITUDE,
     CONF_UPDATE_INTERVAL,
     CONF_WARNING_AREA,
+    CONF_ENABLE_WATER,
+    CONF_WATER_SOURCE,
+    CONF_WATER_STATION_ID,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     FWI_INDEX_SV,
@@ -29,6 +33,12 @@ from .const import (
     PCAT_LABELS,
     PRECIP_THRESHOLD_MM,
     WARNING_AREA_ALL,
+    WATER_SOURCE_AUTO,
+    WATER_SOURCE_HYDRO,
+    WATER_SOURCE_OCEAN,
+    WATER_SOURCE_OFF,
+    HYDRO_BASE,
+    OCEAN_BASE,
     guess_county,
 )
 
@@ -552,6 +562,103 @@ def _point_in_geometry(lon: float, lat: float, geom: dict | None) -> bool:
     return False
 
 
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in kilometres."""
+    r = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+async def _obs_nearest_station(
+    session: ClientSession,
+    base: str,
+    parameter: int,
+    lat: float,
+    lon: float,
+    manual_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Pick nearest active station for an obs parameter (or manual id)."""
+    url = f"{base}/parameter/{parameter}.json"
+    try:
+        async with session.get(url, timeout=25) as resp:
+            if resp.status != 200:
+                return None
+            payload = await resp.json()
+    except Exception:  # noqa: BLE001
+        return None
+    stations = payload.get("station") or []
+    if manual_id:
+        mid = str(manual_id).strip()
+        for s in stations:
+            if str(s.get("key")) == mid or str(s.get("id")) == mid:
+                return s
+    best = None
+    best_d = float("inf")
+    for s in stations:
+        if s.get("active") is False:
+            continue
+        try:
+            slat = float(s["latitude"])
+            slon = float(s["longitude"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        d = _haversine_km(lat, lon, slat, slon)
+        if d < best_d:
+            best_d = d
+            best = s
+    if best is not None:
+        best = dict(best)
+        best["_distance_km"] = round(best_d, 1)
+    return best
+
+
+async def _obs_latest_value(
+    session: ClientSession, base: str, parameter: int, station_key: str
+) -> float | None:
+    """Fetch latest numeric value for station/parameter."""
+    # Prefer live periods
+    st_url = f"{base}/parameter/{parameter}/station/{station_key}.json"
+    try:
+        async with session.get(st_url, timeout=20) as resp:
+            if resp.status != 200:
+                return None
+            st = await resp.json()
+    except Exception:  # noqa: BLE001
+        return None
+    periods = [p.get("key") for p in (st.get("period") or []) if p.get("key")]
+    for period in ("latest-hour", "latest-day", "latest-months"):
+        if period not in periods:
+            continue
+        data_url = (
+            f"{base}/parameter/{parameter}/station/{station_key}"
+            f"/period/{period}/data.json"
+        )
+        try:
+            async with session.get(data_url, timeout=20) as resp:
+                if resp.status != 200:
+                    continue
+                payload = await resp.json()
+        except Exception:  # noqa: BLE001
+            continue
+        values = payload.get("value") or []
+        if not values:
+            continue
+        last = values[-1]
+        try:
+            return float(last.get("value"))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Fetch SMHI forecast; keep last good timeSeries on failure."""
 
@@ -875,6 +982,22 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:  # noqa: BLE001
             _LOGGER.exception("SMHI warnings unexpected error")
 
+
+        # --- Water observations (optional hydroobs / ocobs) ---
+        result["water"] = None
+        enable_water = bool(
+            self.entry.options.get(CONF_ENABLE_WATER, False)
+        )
+        water_source = self.entry.options.get(CONF_WATER_SOURCE, WATER_SOURCE_AUTO)
+        manual_id = str(self.entry.options.get(CONF_WATER_STATION_ID) or "").strip() or None
+        if enable_water and water_source != WATER_SOURCE_OFF:
+            try:
+                result["water"] = await self._async_fetch_water(
+                    lat, lon, water_source, manual_id
+                )
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("SMHI water observations failed")
+
         if snow_ok:
             self._last_good = result
             return result
@@ -1053,3 +1176,113 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "filter_area": area_opt or "geometry",
             "filter_mode": mode,
         }
+
+    async def _async_fetch_water(
+        self,
+        lat: float,
+        lon: float,
+        source: str,
+        manual_id: str | None,
+    ) -> dict[str, Any]:
+        """Resolve nearest hydro/ocean station and latest readings."""
+        out: dict[str, Any] = {
+            "water_level": None,
+            "water_temperature": None,
+            "wave_height": None,
+            "water_station": None,
+            "water_station_distance": None,
+            "source": source,
+        }
+
+        async def hydro_bundle() -> dict[str, Any]:
+            st = await _obs_nearest_station(
+                self.session, HYDRO_BASE, 3, lat, lon, manual_id
+            )
+            if not st:
+                return {}
+            key = str(st.get("key"))
+            level = await _obs_latest_value(self.session, HYDRO_BASE, 3, key)
+            # temperature may use different station – try same id first then nearest
+            temp = await _obs_latest_value(self.session, HYDRO_BASE, 4, key)
+            if temp is None:
+                st_t = await _obs_nearest_station(
+                    self.session, HYDRO_BASE, 4, lat, lon, None
+                )
+                if st_t:
+                    temp = await _obs_latest_value(
+                        self.session, HYDRO_BASE, 4, str(st_t.get("key"))
+                    )
+            return {
+                "water_level": level,
+                "water_temperature": temp,
+                "wave_height": None,
+                "water_station": st.get("name") or key,
+                "water_station_distance": st.get("_distance_km"),
+                "source": WATER_SOURCE_HYDRO,
+                "station_id": key,
+            }
+
+        async def ocean_bundle() -> dict[str, Any]:
+            st = await _obs_nearest_station(
+                self.session, OCEAN_BASE, 6, lat, lon, manual_id
+            )
+            if not st:
+                # fall back to sea temp station list
+                st = await _obs_nearest_station(
+                    self.session, OCEAN_BASE, 5, lat, lon, manual_id
+                )
+            if not st:
+                return {}
+            key = str(st.get("key"))
+            level = await _obs_latest_value(self.session, OCEAN_BASE, 6, key)
+            temp = await _obs_latest_value(self.session, OCEAN_BASE, 5, key)
+            if temp is None:
+                st_t = await _obs_nearest_station(
+                    self.session, OCEAN_BASE, 5, lat, lon, None
+                )
+                if st_t:
+                    temp = await _obs_latest_value(
+                        self.session, OCEAN_BASE, 5, str(st_t.get("key"))
+                    )
+            wave = await _obs_latest_value(self.session, OCEAN_BASE, 1, key)
+            if wave is None:
+                st_w = await _obs_nearest_station(
+                    self.session, OCEAN_BASE, 1, lat, lon, None
+                )
+                if st_w:
+                    wave = await _obs_latest_value(
+                        self.session, OCEAN_BASE, 1, str(st_w.get("key"))
+                    )
+            return {
+                "water_level": level,
+                "water_temperature": temp,
+                "wave_height": wave,
+                "water_station": st.get("name") or key,
+                "water_station_distance": st.get("_distance_km"),
+                "source": WATER_SOURCE_OCEAN,
+                "station_id": key,
+            }
+
+        if source == WATER_SOURCE_HYDRO:
+            return {**out, **(await hydro_bundle())}
+        if source == WATER_SOURCE_OCEAN:
+            return {**out, **(await ocean_bundle())}
+
+        # auto: compare nearest hydro level vs ocean level distance
+        h_st = await _obs_nearest_station(self.session, HYDRO_BASE, 3, lat, lon, manual_id)
+        o_st = await _obs_nearest_station(self.session, OCEAN_BASE, 6, lat, lon, manual_id)
+        h_d = (h_st or {}).get("_distance_km", 9999) or 9999
+        o_d = (o_st or {}).get("_distance_km", 9999) or 9999
+        if h_st and h_d <= o_d:
+            return {**out, **(await hydro_bundle())}
+        if o_st:
+            return {**out, **(await ocean_bundle())}
+        if h_st:
+            return {**out, **(await hydro_bundle())}
+        return out
+
+    def water_bundle(self) -> dict[str, Any]:
+        """Latest water observation fields for sensors."""
+        data = self.data or self._last_good or {}
+        return dict(data.get("water") or {})
+

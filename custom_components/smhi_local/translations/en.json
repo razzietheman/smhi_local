@@ -18,10 +18,21 @@
   "options": {
     "step": {
       "init": {
-        "title": "SMHI Local options",
+        "title": "Options",
         "data": {
           "update_interval": "Update interval (seconds)",
-          "warning_area": "Warning filter: empty = only warnings whose polygon covers your lat/lon. Use 'all' for entire Sweden. (County name is fallback if polygon is missing.)"
+          "warning_area": "Warning area",
+          "enable_water_data": "Enable ocean/lake data",
+          "water_source": "Water station type",
+          "water_station_id": "Manual station ID"
+        },
+        "description": "Update interval, warning filter and optional water data.",
+        "data_description": {
+          "update_interval": "How often forecast, fire and warnings are polled (60–3600).",
+          "warning_area": "Leave empty for point-in-polygon (only zones covering your lat/lon). Use all for entire Sweden.",
+          "enable_water_data": "Fetch nearest hydro or ocean station from SMHI.",
+          "water_source": "hydro = lake/river, ocean = sea, auto = whichever is closer.",
+          "water_station_id": "Optional. Leave empty to auto-pick nearest station."
         }
       }
     }

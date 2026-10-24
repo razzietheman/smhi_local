@@ -1,14 +1,15 @@
+```markdown
 # SMHI Local
 
 [![Open your Home Assistant instance and repository inside a hacs repository.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=razzietheman&repository=smhi_local&category=integration)
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Home Assistant-integration för **SMHI Open Data**: punktprognos (**snow1g**), brandrisk (**fwif1g**) och konsekvensbaserade varningar (**IBWW**).
+Home Assistant-integration för **SMHI Open Data**: punktprognos (**snow1g**), brandrisk (**fwif1g**), konsekvensbaserade varningar (**IBWW**) samt valfri hav-/sjödata (**ocobs** / **hydroobs**).
 
 Bygger en `weather`-entitet plus sensorer direkt från API:erna, med **minne av senaste giltiga prognos** så dashboards inte blir `unavailable` vid tillfälliga nätverks-/API-fel.
 
-**Version:** 1.4.1  
+**Version:** 1.4.3  
 **Attribution:** SMHI Open Data Powered by Rasmus
 
 ---
@@ -25,11 +26,12 @@ Bygger en `weather`-entitet plus sensorer direkt från API:erna, med **minne av 
 8. [Härledda sensorer](#härledda-sensorer)
 9. [Metadata](#metadata)
 10. [Brandrisk (fwif1g)](#brandrisk-fwif1g)
-11. [Varningar (IBWW) – länsfilter](#varningar-ibww--länsfilter)
-12. [Options](#options)
-13. [Jämförelse med officiella SMHI](#jämförelse-med-officiella-smhi)
-14. [API-referens](#api-referens)
-15. [Ändringslogg (utdrag)](#ändringslogg-utdrag)
+11. [Varningar (IBWW) – punkt-i-polygon](#varningar-ibww--punkt-i-polygon)
+12. [Hav- och sjödata (valfritt)](#hav--och-sjödata-valfritt)
+13. [Options](#options)
+14. [Jämförelse med officiella SMHI](#jämförelse-med-officiella-smhi)
+15. [API-referens](#api-referens)
+16. [Ändringslogg (utdrag)](#ändringslogg-utdrag)
 
 ---
 
@@ -39,7 +41,8 @@ Bygger en `weather`-entitet plus sensorer direkt från API:erna, med **minne av 
 |-------|------------|
 | **snow1g** punktprognos | Aktuellt väder, hourly/daily forecast, ~20+ sensorer |
 | **fwif1g** dygn | Brandrisk / FWI-index och relaterade mått |
-| **IBWW** varningar | Aktiva vädervarningar, **filtrerade till ditt län** |
+| **IBWW** varningar | Aktiva vädervarningar, **filtrerade mot din lat/lon (polygon)** |
+| **hydroobs** / **ocobs** | Valfritt: vattenstånd, vattentemperatur, våghöjd från närmaste station |
 
 En config entry (lat/lon) → en enhet i HA med weather + alla sensorer. Uppdateringsintervall är konfigurerbart (default 300 s).
 
@@ -48,7 +51,7 @@ En config entry (lat/lon) → en enhet i HA med weather + alla sensorer. Uppdate
 ## Installation
 
 ### HACS (rekommenderas)
-1. Klicka på knappen högst upp för att öppna direkt i HACS, eller gör det manuellt: HACS → Integrations → ⋮ → *Custom repositories*
+1. Klicka på knappen högst upp för att öppna direkt i HACS, eller: HACS → Integrations → ⋮ → *Custom repositories*
 2. URL till repot, kategori **Integration**
 3. Installera **SMHI Local** → starta om HA
 4. *Inställningar → Enheter och tjänster → Lägg till integration → SMHI Local*
@@ -99,24 +102,22 @@ Config entry (lat, lon, name, options)
         ▼  poll (default 300 s)
 SmhiLocalCoordinator
         │
-        ├── GET snow1g  → timeSeries + createdTime/referenceTime/geometry
-        ├── GET fwif1g  → brandrisk (närmaste dygn)
-        └── GET IBWW    → varningslista (filtreras till län)
+        ├── GET snow1g   → timeSeries + createdTime/referenceTime/geometry
+        ├── GET fwif1g   → brandrisk (närmaste dygn)
+        ├── GET IBWW     → varningar (punkt-i-polygon mot lat/lon)
+        └── GET hydro/ocobs (valfritt) → närmaste vattenstation
         │
         ├── lyckad snow1g → spara _last_good
-        └── misslyckad    → returnera _last_good (fire/warnings kan uppdateras ovanpå)
+        └── misslyckad    → returnera _last_good (övrigt kan uppdateras ovanpå)
         │
-        ├── current_bundle()   → aktuella sensorer + weather state
-        ├── derived_bundle()   → nästa nederbörd, 12 h, åska, sikt …
-        ├── fire_bundle()      → FWI m.m.
-        ├── warnings_bundle()  → filtrerade varningar
-        └── meta_bundle()      → prognos skapad, modellpunkt
+        ├── current_bundle() / derived_bundle() / fire_bundle()
+        ├── warnings_bundle()  → polygon-filtrerade varningar
+        ├── water_bundle()     → vattenstånd, temp, våghöjd …
+        └── meta_bundle()
 ```
 
 - **Platforms:** `sensor`, `weather`
-- **Normalisering:** snow1g-fält → interna nycklar (äldre pmp3g stöds fortfarande om det dyker upp)
-
-**Aktuellt väder** = tidpunkten i `timeSeries` med minsta `|t − now|` (närmaste prognospunkt).
+- **Aktuellt väder** = tidpunkten i `timeSeries` närmast `now()`
 
 ---
 
@@ -131,8 +132,6 @@ Vid HTTP-fel, nätverksfel eller tom `timeSeries` returneras **`_last_good`** i 
 | Första start utan nät | `ConfigEntryNotReady` |
 | Åldrande data | Visas tills ny hämtning lyckas |
 
-Motsvarar idén bakom en `latest_valid`-templatesensor, men centralt för alla entiteter.
-
 ---
 
 ## Weather-entitet
@@ -146,104 +145,99 @@ Motsvarar idén bakom en `latest_valid`-templatesensor, men centralt för alla e
 | Forecast hourly & daily | Hela (cachade) `timeSeries` |
 | Attribution | `SMHI Open Data Powered by Rasmus` |
 
-`condition` måste vara engelska HA-nycklar. Svensk text: sensorn **Förhållande**.
+Svensk text för väderläge: sensorn **Förhållande**.
 
 ---
 
 ## Aktuella sensorer (snow1g)
 
-Från närmaste prognospunkt:
-
-| Friendly name | Nyckel | Enhet |
-|---------------|--------|-------|
-| Temperatur | `air_temperature` | °C |
-| Känns som | `feels_like` | °C (temp + fukt + vind) |
-| Luftfuktighet | `relative_humidity` | % |
-| Lufttryck | `air_pressure_at_mean_sea_level` | hPa |
-| Vindhastighet | `wind_speed` | m/s |
-| Vindby | `wind_speed_of_gust` | m/s |
-| Vindriktning | `wind_direction_sv` | — (t.ex. Sydost) |
-| Vindriktning grader | `wind_from_direction` | ° |
-| Sikt | `visibility_in_air` | km |
-| Nederbörd | `precipitation_amount_mean` | mm/h |
-| Nederbörd min / max / median | ensemble | mm/h |
-| Nederbördsrisk | `probability_of_precipitation` | % |
-| Vädersymbol | `symbol_code` | 1–27 |
-| Förhållande | `condition_sv` | Klart, Mulet, … |
-| Molntyp | `cloud_type` | t.ex. Stratocumulus |
-| Molnmängd | `cloud_cover_pct` | % (oktas→%) |
-| Lågt / Medelhögt / Högt molntäcke | | % |
-| Molnbas / Molntopp | | m |
-| Åskrisk nu | `thunderstorm_probability` | % |
-| Risk för frusen nederbörd | `probability_of_frozen_precipitation` | % |
+Från närmaste prognospunkt: temperatur, känns som, fukt, tryck, vind (hastighet/by/riktning text + grader), sikt, nederbörd (mean/min/max/median), nederbördsrisk, vädersymbol, förhållande, molntyp, molnmängd, lågt/medel/högt molntäcke, molnbas/molntopp, åskrisk nu, risk för frusen nederbörd.
 
 ---
 
 ## Härledda sensorer
 
-Skannar framtida punkter i cachad `timeSeries`:
+| Friendly name | Beskrivning |
+|---------------|-------------|
+| **Nästa nederbördstyp** | Regn, Snö, … / *Ingen nederbörd väntas* |
+| **Nästa nederbördsmängd** | mm/h |
+| **Nästa nederbördstid** | Start–slut, t.ex. `20:00 onsdag … - 00:00 torsdag …` |
+| **Nederbörd kommande 12h** | mm (summa) |
+| **Åskrisk** | t.ex. *Liten åskrisk 4% i kväll klockan 23* |
+| **Åskrisk max %** | Numeriskt max inom 12 h |
+| **Nästa dåliga sikt** | Klass + datum/tid, eller *God sikt* |
+| **Snöandel nästa nederbörd** | *Allt snö* / *Ej tillämpligt* / … |
 
-| Friendly name | Nyckel | Beskrivning |
-|---------------|--------|-------------|
-| **Nästa nederbördstyp** | `next_precip_type` | Regn, Snö, … eller *Ingen nederbörd väntas* |
-| **Nästa nederbördsmängd** | `next_precip_amount` | mm/h |
-| **Nästa nederbördstid** | `next_precip_time` | t.ex. `20:00 onsdag 21 oktober - 00:00 torsdag 22 oktober` |
-| **Nederbörd kommande 12h** | `precip_next_12h` | mm (summa) |
-| **Åskrisk** | `thunder_risk_text` | *Liten åskrisk 4% i kväll klockan 23* |
-| **Åskrisk max %** | `thunder_risk_12h` | % |
-| **Nästa dåliga sikt** | `next_bad_visibility` | *Måttlig sikt (9.5 km), onsdag …* eller *God sikt* |
-| **Snöandel nästa nederbörd** | `next_snow_share` | *Allt snö* / *Ej tillämpligt* / … |
-
-Tröskel nederbörd: **≥ 0,1 mm**. Dålig sikt: **&lt; 10 km** inom 48 h.
-
-> **OBS:** Gamla template-id `sensor.smhi_nasta_nederbord` motsvaras av **`sensor.smhi_nasta_nederbordstyp`** i integrationen.
+> Gamla template-id `sensor.smhi_nasta_nederbord` → **`sensor.smhi_nasta_nederbordstyp`**.
 
 ---
 
 ## Metadata
 
-| Friendly name | Innehåll |
-|---------------|----------|
-| Prognos skapad | `createdTime` (lokal tid) |
+| Sensor | Innehåll |
+|--------|----------|
+| Prognos skapad | `createdTime` |
 | Prognos referenstid | `referenceTime` |
-| Modellpunkt | Faktisk grid `lat, lon` som SMHI svarade med |
+| Modellpunkt | Faktisk grid `lat, lon` |
 
 ---
 
 ## Brandrisk (fwif1g)
 
-Dygnsprognos, närmaste `validTime`:
-
 | Sensor | Beskrivning |
 |--------|-------------|
 | **Brandrisk** | Text: Liten risk … Extremt stor risk |
-| FWI-värde / FWI-index | Numeriskt index |
-| ISI, BUI, FFMC, DMC, DC | Klassiska FWI-komponenter |
-| Gräsbrandsrisk | Textnivå (eller ej tillämpligt) |
+| FWI-värde / FWI-index | Numeriskt |
+| ISI, BUI, FFMC, DMC, DC | FWI-komponenter |
+| Gräsbrandsrisk | Textnivå |
 | Potentiell spridningshastighet | m/min |
 | Skogstorkt index | Numeriskt |
 
 ---
 
-## Varningar (IBWW) – länsfilter
+## Varningar (IBWW) – punkt-i-polygon
 
-API: `https://opendata-download-warnings.smhi.se/ibww/api/version/1/warning.json` (hela Sverige).
+API:et returnerar **hela Sverige**. Från **1.4.2** filtreras varningar med **ray-casting** mot varje `warningAreas[].area.geometry` (GeoJSON Polygon/MultiPolygon, EPSG:4326).
 
-Integrationen **filtrerar till ditt län** så du inte får Skåne/Gotland när du bor i Skövde.
+Din config entry:s **lat/lon** måste ligga **inuti** zonen – annars visas den inte.  
+Exempel Skövde: *Västkusten*, *Dalsland* och liknande zoner filtreras bort även om de nämner Götaland i namnet.
 
-| Sensor | Tillstånd |
-|--------|-----------|
-| **Varningar** | t.ex. `1 aktiva · Meddelande: Risk för vattenbrist (Västra Götalands län)` |
+| Sensor | Exempel |
+|--------|---------|
+| **Varningar** | `1 aktiva · Meddelande: Risk för vattenbrist (Västra Götalands län)` |
 | **Antal varningar** | Heltal |
 
-**Attribut:** `warnings` (lista), `filter_area` (aktivt län).
+**Attribut:** `warnings`, `filter_area`, `filter_mode` (`point_in_polygon` / `all`), per rad `in_polygon`.
 
-### Hur filtret väljs
-1. **Options → Varningsområde** om ifyllt  
-2. Annars **auto** från lat/lon (ungefärliga länsboxar) → Skövde ≈ *Västra Götalands län*  
-3. Värdet `all` / `alla` / `*` → ingen filter (hela landet)
+| Varningsområde (options) | Effekt |
+|--------------------------|--------|
+| **Tomt** (rekommenderas) | Bara zoner som täcker din punkt |
+| `all` / `alla` | Hela Sverige |
+| Länsnamn | Används främst om polygon saknas (äldre fallback) |
 
-Matchar både `areaName` och `affectedAreas` (delsträng, skiftlägesokänsligt).
+---
+
+## Hav- och sjödata (valfritt)
+
+Från **1.4.3**. Av som standard – aktiveras under *Konfigurera*.
+
+| Källa | API | Typiska mätvärden |
+|-------|-----|-------------------|
+| **hydro** | hydroobs | Sjö/vattendrag: vattenstånd (cm), vattentemperatur |
+| **ocean** | ocobs | Hav: vattenstånd, havstemperatur, signifikant våghöjd |
+| **auto** | båda | Väljer källa vars närmaste station ligger närmast dig |
+
+**Station:** Haversine från din lat/lon (eller manuellt stations-ID).
+
+| Sensor | Enhet |
+|--------|--------|
+| Vattenstånd | cm |
+| Vattentemperatur | °C |
+| Våghöjd | m (ocean) |
+| Vattenstation | namn |
+| Avstånd till vattenstation | km |
+
+> Inland (t.ex. Skövde) kan få närmaste *live*-sjöstation tiotals km bort (t.ex. Vänern). Avståndssensorn visar det tydligt. Alla stationer har inte `latest-hour`/`latest-day`.
 
 ---
 
@@ -253,10 +247,13 @@ Matchar både `areaName` och `affectedAreas` (delsträng, skiftlägesokänsligt)
 
 | Alternativ | Default | Beskrivning |
 |------------|---------|-------------|
-| **Uppdateringsintervall** | 300 s | 60–3600 s – hur ofta API:erna pollas |
-| **Varningsområde** | auto från lat/lon | Länsnamn, t.ex. `Västra Götalands län`. Tomt = auto. `all` = hela Sverige |
+| **Uppdateringsintervall** | 300 s | 60–3600 s |
+| **Varningsområde** | tomt | Tomt = punkt-i-polygon. `all` = hela Sverige |
+| **Aktivera hav- och sjödata** | av | På för hydro/ocobs |
+| **Typ av vattenstation** | auto | auto / hydro / ocean / av |
+| **Manuellt stations-ID** | tomt | Åsidosätter närmaste-station |
 
-Ändring laddar om config entry.
+Fältetiketter är korta; hjälptext ligger i `data_description` så den inte krockar med värdet i UI.
 
 ---
 
@@ -264,15 +261,13 @@ Matchar både `areaName` och `affectedAreas` (delsträng, skiftlägesokänsligt)
 
 | | Officiella SMHI (Core) | SMHI Local |
 |--|------------------------|------------|
-| Underhåll | Home Assistant-projektet | Denna custom/HACS |
-| Weather + forecast | Ja (även twice-daily) | Ja (hourly/daily) |
-| Brandrisk FWI | Ja | Ja (fwif1g) |
-| Varningar | Nej (separat integration) | Ja, med **länsfilter** |
-| Svenska “premium”-sensorer (nästa nederbörd, åskrisk-text, molntyp, 12 h-summa) | Byggs med templates | Inbyggt |
-| Cache vid API-glitch | Standard HA | `_last_good` → stabil UI |
+| Weather + forecast | Ja (+ twice-daily) | Ja (hourly/daily) |
+| Brandrisk FWI | Ja | Ja |
+| Varningar | Nej | Ja, **polygon mot din punkt** |
+| Hav/sjö-observationer | Nej | Valfritt (hydro/ocobs) |
+| Svenska “premium”-sensorer | Templates | Inbyggt |
+| Cache vid API-glitch | Standard | `_last_good` |
 | Poll-intervall | ~30 min | Valbart |
-
-Båda använder SMHI:s öppna data. SMHI Local är ett **lager ovanpå** samma källa, optimerat för dashboard, TTS och automations utan 20 templates.
 
 ---
 
@@ -280,9 +275,11 @@ Båda använder SMHI:s öppna data. SMHI Local är ett **lager ovanpå** samma k
 
 | Tjänst | Endpoint |
 |--------|----------|
-| Prognos | `…/snow1g/version/1/geotype/point/lon/{lon}/lat/{lat}/data.json` |
-| Brandrisk | `…/fwif1g/version/1/daily/geotype/point/lon/{lon}/lat/{lat}/data.json` |
+| Prognos | `…/snow1g/…/point/lon/{lon}/lat/{lat}/data.json` |
+| Brandrisk | `…/fwif1g/version/1/daily/…/point/lon/{lon}/lat/{lat}/data.json` |
 | Varningar | `https://opendata-download-warnings.smhi.se/ibww/api/version/1/warning.json` |
+| Sjö/vattendrag | `https://opendata-download-hydroobs.smhi.se/api/version/1.0/…` |
+| Hav | `https://opendata-download-ocobs.smhi.se/api/version/1.0/…` |
 
 Ingen autentisering. Villkor: [SMHI Open Data](https://opendata.smhi.se).
 
@@ -290,14 +287,24 @@ Ingen autentisering. Villkor: [SMHI Open Data](https://opendata.smhi.se).
 
 ## Ändringslogg (utdrag)
 
+### 1.4.3
+- Options: korta etiketter + `data_description` (hjälptext krockar inte med fältvärdet)
+- Valfri hav-/sjödata (hydroobs / ocobs): närmaste station, manuellt ID
+- Sensorer: vattenstånd, vattentemperatur, våghöjd, stationsnamn, avstånd
+- Nya installationer: tomt varningsområde = punkt-i-polygon
+
+### 1.4.2
+- Varningar filtreras med **punkt-i-polygon** mot SMHI:s GeoJSON-zoner
+- Västkust-/Dalsland-varningar m.m. visas inte om din punkt inte ligger i zonen
+- Attribut `filter_mode`, `in_polygon`
+
 ### 1.4.1
-- Länsfilter för IBWW-varningar (auto från koordinater + options)
-- Attribut `filter_area` på varningssensorn
+- Länsfilter för IBWW (föregångare till polygon-filter)
 - Options: *Varningsområde*
 
 ### 1.4.0
 - Brandrisk (fwif1g) och IBWW-varningar
-- Extra snow1g-fält: molnbas/topp, molnnivåer %, nederbörd min/max/median, vind i grader, prognosmetadata, modellpunkt
+- Extra snow1g-fält (molnbas, ensemble-nederbörd, metadata, …)
 
 ### 1.3.x
 - Första publika paketeringen med weather, härledda sensorer och last-good-cache
@@ -307,5 +314,6 @@ Ingen autentisering. Villkor: [SMHI Open Data](https://opendata.smhi.se).
 ## Licens
 
 MIT – se [LICENSE](LICENSE).  
-Prognos-, brandrisk- och varningsdata tillhör SMHI.  
+Prognos-, brandrisk-, varnings- och observationsdata tillhör SMHI.  
 Integrationen: **SMHI Open Data Powered by Rasmus**.
+```

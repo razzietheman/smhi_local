@@ -9,6 +9,19 @@ CONF_NAME = "name"
 CONF_UPDATE_INTERVAL = "update_interval"
 CONF_WARNING_AREA = "warning_area"
 WARNING_AREA_ALL = "all"  # show all counties
+CONF_ENABLE_WATER = "enable_water_data"
+CONF_WATER_SOURCE = "water_source"
+CONF_WATER_STATION_ID = "water_station_id"
+WATER_SOURCE_OFF = "off"
+WATER_SOURCE_HYDRO = "hydro"
+WATER_SOURCE_OCEAN = "ocean"
+WATER_SOURCE_AUTO = "auto"
+
+# Observation APIs
+HYDRO_BASE = "https://opendata-download-hydroobs.smhi.se/api/version/1.0"
+OCEAN_BASE = "https://opendata-download-ocobs.smhi.se/api/version/1.0"
+# Hydro: 3=vattenstånd cm, 4=vattendragstemperatur
+# Ocean: 5=havstemperatur, 6=havsvattenstånd, 1=signifikant våghöjd
 
 DEFAULT_NAME = "SMHI"
 DEFAULT_UPDATE_INTERVAL = 300  # seconds
@@ -561,3 +574,46 @@ def guess_county(lat: float, lon: float) -> str | None:
         if la0 <= lat <= la1 and lo0 <= lon <= lo1:
             return name
     return None
+
+WATER_SENSOR_TYPES: tuple[dict, ...] = (
+    {
+        "key": "water_level",
+        "name": "Vattenstånd",
+        "unit": "cm",
+        "device_class": None,
+        "state_class": "measurement",
+        "icon": "mdi:waves",
+    },
+    {
+        "key": "water_temperature",
+        "name": "Vattentemperatur",
+        "unit": "°C",
+        "device_class": "temperature",
+        "state_class": "measurement",
+        "icon": "mdi:thermometer-water",
+    },
+    {
+        "key": "wave_height",
+        "name": "Våghöjd",
+        "unit": "m",
+        "device_class": "distance",
+        "state_class": "measurement",
+        "icon": "mdi:wave",
+    },
+    {
+        "key": "water_station",
+        "name": "Vattenstation",
+        "unit": None,
+        "device_class": None,
+        "state_class": None,
+        "icon": "mdi:map-marker",
+    },
+    {
+        "key": "water_station_distance",
+        "name": "Avstånd till vattenstation",
+        "unit": "km",
+        "device_class": "distance",
+        "state_class": "measurement",
+        "icon": "mdi:map-marker-distance",
+    },
+)
