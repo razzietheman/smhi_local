@@ -579,6 +579,21 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+async def _obs_station_periods(
+    session: ClientSession, base: str, parameter: int, station_key: str
+) -> list[str]:
+    """Return available period keys for a station."""
+    st_url = f"{base}/parameter/{parameter}/station/{station_key}.json"
+    try:
+        async with session.get(st_url, timeout=20) as resp:
+            if resp.status != 200:
+                return []
+            st = await resp.json()
+    except Exception:  # noqa: BLE001
+        return []
+    return [p.get("key") for p in (st.get("period") or []) if p.get("key")]
+
+
 async def _obs_nearest_station(
     session: ClientSession,
     base: str,
@@ -586,8 +601,14 @@ async def _obs_nearest_station(
     lat: float,
     lon: float,
     manual_id: str | None = None,
+    *,
+    prefer_live: bool = True,
 ) -> dict[str, Any] | None:
-    """Pick nearest active station for an obs parameter (or manual id)."""
+    """Pick nearest station for an obs parameter (or manual id).
+
+    When prefer_live is True, stations with latest-hour/day/months are preferred
+    over archive-only stations (important for hydro water level near inland towns).
+    """
     url = f"{base}/parameter/{parameter}.json"
     try:
         async with session.get(url, timeout=25) as resp:
@@ -601,10 +622,21 @@ async def _obs_nearest_station(
         mid = str(manual_id).strip()
         for s in stations:
             if str(s.get("key")) == mid or str(s.get("id")) == mid:
+                s = dict(s)
+                try:
+                    s["_distance_km"] = round(
+                        _haversine_km(
+                            lat, lon, float(s["latitude"]), float(s["longitude"])
+                        ),
+                        1,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    s["_distance_km"] = None
                 return s
-    best = None
-    best_d = float("inf")
+
+    candidates: list[tuple[float, dict[str, Any]]] = []
     for s in stations:
+        # Keep active stations; also keep those without active flag
         if s.get("active") is False:
             continue
         try:
@@ -613,13 +645,47 @@ async def _obs_nearest_station(
         except (KeyError, TypeError, ValueError):
             continue
         d = _haversine_km(lat, lon, slat, slon)
-        if d < best_d:
-            best_d = d
-            best = s
-    if best is not None:
-        best = dict(best)
-        best["_distance_km"] = round(best_d, 1)
-    return best
+        candidates.append((d, s))
+    if not candidates:
+        # last resort: include inactive (archive-only networks)
+        for s in stations:
+            try:
+                slat = float(s["latitude"])
+                slon = float(s["longitude"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            d = _haversine_km(lat, lon, slat, slon)
+            candidates.append((d, s))
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0])
+
+    if prefer_live:
+        # Check nearest N stations for live periods (limit HTTP)
+        live_best = None
+        live_d = float("inf")
+        for d, s in candidates[:25]:
+            key = str(s.get("key"))
+            periods = await _obs_station_periods(session, base, parameter, key)
+            if any(p in periods for p in ("latest-hour", "latest-day", "latest-months")):
+                if d < live_d:
+                    live_d = d
+                    live_best = s
+                    # first match is nearest with live among scanned; can break if sorted
+                    break
+        if live_best is not None:
+            live_best = dict(live_best)
+            live_best["_distance_km"] = round(live_d, 1)
+            live_best["_periods_hint"] = "live"
+            return live_best
+
+    # Fallback: absolute nearest (may be archive-only)
+    d, s = candidates[0]
+    s = dict(s)
+    s["_distance_km"] = round(d, 1)
+    s["_periods_hint"] = "nearest"
+    return s
 
 
 async def _obs_latest_value(
@@ -1229,21 +1295,31 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         async def hydro_bundle() -> dict[str, Any]:
             st = await _obs_nearest_station(
-                self.session, HYDRO_BASE, 3, lat, lon, manual_id
+                self.session, HYDRO_BASE, 3, lat, lon, manual_id, prefer_live=True
             )
             if not st:
                 return {}
             key = str(st.get("key"))
-            level, _ = await _obs_latest_value(self.session, HYDRO_BASE, 3, key)
-            # temperature may use different station – try same id first then nearest
-            temp, _ = await _obs_latest_value(self.session, HYDRO_BASE, 4, key)
+            # Prefer live; fall back to corrected-archive (many lake stations)
+            level, level_date = await _obs_latest_value(
+                self.session, HYDRO_BASE, 3, key, allow_archive=True
+            )
+            # Hydro water temperature network is sparse/inactive – try same station,
+            # then nearest temp station including archive
+            temp, _ = await _obs_latest_value(
+                self.session, HYDRO_BASE, 4, key, allow_archive=True
+            )
             if temp is None:
                 st_t = await _obs_nearest_station(
-                    self.session, HYDRO_BASE, 4, lat, lon, None
+                    self.session, HYDRO_BASE, 4, lat, lon, None, prefer_live=True
                 )
                 if st_t:
                     temp, _ = await _obs_latest_value(
-                        self.session, HYDRO_BASE, 4, str(st_t.get("key"))
+                        self.session,
+                        HYDRO_BASE,
+                        4,
+                        str(st_t.get("key")),
+                        allow_archive=True,
                     )
             return {
                 "water_level": level,
@@ -1253,7 +1329,9 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "water_station_distance": st.get("_distance_km"),
                 "source": WATER_SOURCE_HYDRO,
                 "station_id": key,
+                "water_level_date_ms": level_date,
             }
+
 
         async def ocean_bundle() -> dict[str, Any]:
             st = await _obs_nearest_station(
@@ -1267,8 +1345,8 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not st:
                 return {}
             key = str(st.get("key"))
-            level, _ = await _obs_latest_value(self.session, OCEAN_BASE, 6, key)
-            temp, _ = await _obs_latest_value(self.session, OCEAN_BASE, 5, key)
+            level, _ = await _obs_latest_value(self.session, OCEAN_BASE, 6, key, allow_archive=True)
+            temp, _ = await _obs_latest_value(self.session, OCEAN_BASE, 5, key, allow_archive=True)
             if temp is None:
                 st_t = await _obs_nearest_station(
                     self.session, OCEAN_BASE, 5, lat, lon, None

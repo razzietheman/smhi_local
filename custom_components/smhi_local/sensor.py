@@ -396,6 +396,10 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     def native_unit_of_measurement(self) -> str | None:
         if not self._water_enabled():
             return None
+        # Hide unit when state is textual placeholder
+        val = self.native_value
+        if isinstance(val, str):
+            return None
         return self._unit
 
     @property
@@ -410,10 +414,15 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
             return "Ej aktiverad"
         bundle = self.coordinator.water_bundle()
         if not bundle:
-            return None
+            return "Ingen data"
         val = bundle.get(self._key)
         if val is None:
-            return None
+            # Station name may still be known when readings are missing
+            if self._key == "water_station":
+                return "Ingen data"
+            if self._key == "water_station_distance":
+                return None
+            return "Ingen data"
         if self._key == "water_station":
             return val
         try:
