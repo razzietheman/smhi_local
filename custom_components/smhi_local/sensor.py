@@ -16,6 +16,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     CONF_NAME,
+    CONF_ENABLE_WATER,
+    CONF_ENABLE_ICE,
+    CONF_WATER_SOURCE,
     DEFAULT_NAME,
     DERIVED_SENSOR_TYPES,
     DOMAIN,
@@ -25,6 +28,7 @@ from .const import (
     WARNING_SENSOR_TYPES,
     WATER_SENSOR_TYPES,
     ICE_SENSOR_TYPES,
+    WATER_SOURCE_OFF,
 )
 from .coordinator import SmhiLocalCoordinator
 
@@ -368,19 +372,42 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         desc: dict[str, Any],
     ) -> None:
         super().__init__(coordinator)
+        self._entry = entry
         self._key = desc["key"]
+        self._unit = desc.get("unit")
+        self._state_class_cfg = desc.get("state_class")
         self._attr_name = desc["name"]
         self._attr_unique_id = f"{entry.entry_id}_water_{self._key}"
-        self._attr_native_unit_of_measurement = desc.get("unit")
         self._attr_icon = desc.get("icon")
         dc = desc.get("device_class")
         self._attr_device_class = _DEVICE_CLASS_MAP.get(dc) if dc else None
-        sc = desc.get("state_class")
-        self._attr_state_class = _STATE_CLASS_MAP.get(sc) if sc else None
         self._attr_device_info = _device_info(entry, device_name)
+
+    def _water_enabled(self) -> bool:
+        opts = self._entry.options
+        if not bool(opts.get(CONF_ENABLE_WATER, False)):
+            return False
+        source = opts.get(CONF_WATER_SOURCE)
+        if source == WATER_SOURCE_OFF:
+            return False
+        return True
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        if not self._water_enabled():
+            return None
+        return self._unit
+
+    @property
+    def state_class(self):
+        if not self._water_enabled():
+            return None
+        return _STATE_CLASS_MAP.get(self._state_class_cfg) if self._state_class_cfg else None
 
     @property
     def native_value(self) -> float | int | str | None:
+        if not self._water_enabled():
+            return "Ej aktiverad"
         bundle = self.coordinator.water_bundle()
         if not bundle:
             return None
@@ -397,7 +424,6 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 
     @property
     def available(self) -> bool:
-        # Available when coordinator is ok; value may still be None if water disabled
         return super().available
 
 
@@ -414,19 +440,36 @@ class SmhiIceSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         desc: dict[str, Any],
     ) -> None:
         super().__init__(coordinator)
+        self._entry = entry
         self._key = desc["key"]
+        self._unit = desc.get("unit")
+        self._state_class_cfg = desc.get("state_class")
         self._attr_name = desc["name"]
         self._attr_unique_id = f"{entry.entry_id}_ice_{self._key}"
-        self._attr_native_unit_of_measurement = desc.get("unit")
         self._attr_icon = desc.get("icon")
         dc = desc.get("device_class")
         self._attr_device_class = _DEVICE_CLASS_MAP.get(dc) if dc else None
-        sc = desc.get("state_class")
-        self._attr_state_class = _STATE_CLASS_MAP.get(sc) if sc else None
         self._attr_device_info = _device_info(entry, device_name)
+
+    def _ice_enabled(self) -> bool:
+        return bool(self._entry.options.get(CONF_ENABLE_ICE, False))
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        if not self._ice_enabled():
+            return None
+        return self._unit
+
+    @property
+    def state_class(self):
+        if not self._ice_enabled():
+            return None
+        return _STATE_CLASS_MAP.get(self._state_class_cfg) if self._state_class_cfg else None
 
     @property
     def native_value(self) -> float | int | str | None:
+        if not self._ice_enabled():
+            return "Ej aktiverad"
         bundle = self.coordinator.ice_bundle()
         if not bundle:
             return None
