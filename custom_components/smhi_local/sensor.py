@@ -99,7 +99,7 @@ def _device_info(entry: ConfigEntry, device_name: str) -> DeviceInfo:
 class SmhiFieldSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     """Single field from nearest SMHI timeSeries point."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
@@ -156,7 +156,7 @@ class SmhiFieldSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 class SmhiDerivedSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     """Sensor derived by scanning the full forecast series."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
@@ -210,7 +210,7 @@ class SmhiDerivedSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 class SmhiCurrentSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     """Summary sensor: state = symbol_code, attributes = all current fields."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
     _attr_name = "Current"
     _attr_icon = "mdi:weather-partly-cloudy"
 
@@ -265,7 +265,7 @@ class SmhiCurrentSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 class SmhiMetaSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     """Forecast metadata (created time, grid point)."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
@@ -289,7 +289,7 @@ class SmhiMetaSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 class SmhiFireSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     """Fire weather index sensors (fwif1g daily)."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
@@ -328,7 +328,7 @@ class SmhiFireSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 class SmhiWarningSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     """IBWW weather warnings summary."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
@@ -362,7 +362,7 @@ class SmhiWarningSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     """Optional hydro/ocean observation sensors."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
@@ -439,7 +439,7 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 class SmhiIceSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
     """Optional ice observation sensors (hydroobs, seasonal)."""
 
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False
 
     def __init__(
         self,
