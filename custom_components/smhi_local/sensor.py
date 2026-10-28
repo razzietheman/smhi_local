@@ -376,40 +376,23 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         self._key = desc["key"]
         self._unit = desc.get("unit")
         self._state_class_cfg = desc.get("state_class")
+        dc = desc.get("device_class")
+        self._device_class = _DEVICE_CLASS_MAP.get(dc) if dc else None
         self._attr_name = desc["name"]
         self._attr_unique_id = f"{entry.entry_id}_water_{self._key}"
         self._attr_icon = desc.get("icon")
-        dc = desc.get("device_class")
-        self._attr_device_class = _DEVICE_CLASS_MAP.get(dc) if dc else None
+        # Do NOT set _attr_device_class – property clears it for text states
         self._attr_device_info = _device_info(entry, device_name)
 
     def _water_enabled(self) -> bool:
         opts = self._entry.options
         if not bool(opts.get(CONF_ENABLE_WATER, False)):
             return False
-        source = opts.get(CONF_WATER_SOURCE)
-        if source == WATER_SOURCE_OFF:
+        if opts.get(CONF_WATER_SOURCE) == WATER_SOURCE_OFF:
             return False
         return True
 
-    @property
-    def native_unit_of_measurement(self) -> str | None:
-        if not self._water_enabled():
-            return None
-        # Hide unit when state is textual placeholder
-        val = self.native_value
-        if isinstance(val, str):
-            return None
-        return self._unit
-
-    @property
-    def state_class(self):
-        if not self._water_enabled():
-            return None
-        return _STATE_CLASS_MAP.get(self._state_class_cfg) if self._state_class_cfg else None
-
-    @property
-    def native_value(self) -> float | int | str | None:
+    def _computed_value(self) -> float | int | str | None:
         if not self._water_enabled():
             return "Ej aktiverad"
         bundle = self.coordinator.water_bundle()
@@ -417,11 +400,6 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
             return "Ingen data"
         val = bundle.get(self._key)
         if val is None:
-            # Station name may still be known when readings are missing
-            if self._key == "water_station":
-                return "Ingen data"
-            if self._key == "water_station_distance":
-                return None
             return "Ingen data"
         if self._key == "water_station":
             return val
@@ -432,8 +410,31 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
             return val
 
     @property
-    def available(self) -> bool:
-        return super().available
+    def native_value(self) -> float | int | str | None:
+        return self._computed_value()
+
+    @property
+    def device_class(self):
+        # HA forbids non-numeric state with device_class set
+        if isinstance(self._computed_value(), str):
+            return None
+        return self._device_class
+
+    @property
+    def state_class(self):
+        if isinstance(self._computed_value(), str):
+            return None
+        return (
+            _STATE_CLASS_MAP.get(self._state_class_cfg)
+            if self._state_class_cfg
+            else None
+        )
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        if isinstance(self._computed_value(), str):
+            return None
+        return self._unit
 
 
 class SmhiIceSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
@@ -453,38 +454,25 @@ class SmhiIceSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         self._key = desc["key"]
         self._unit = desc.get("unit")
         self._state_class_cfg = desc.get("state_class")
+        dc = desc.get("device_class")
+        self._device_class = _DEVICE_CLASS_MAP.get(dc) if dc else None
         self._attr_name = desc["name"]
         self._attr_unique_id = f"{entry.entry_id}_ice_{self._key}"
         self._attr_icon = desc.get("icon")
-        dc = desc.get("device_class")
-        self._attr_device_class = _DEVICE_CLASS_MAP.get(dc) if dc else None
         self._attr_device_info = _device_info(entry, device_name)
 
     def _ice_enabled(self) -> bool:
         return bool(self._entry.options.get(CONF_ENABLE_ICE, False))
 
-    @property
-    def native_unit_of_measurement(self) -> str | None:
-        if not self._ice_enabled():
-            return None
-        return self._unit
-
-    @property
-    def state_class(self):
-        if not self._ice_enabled():
-            return None
-        return _STATE_CLASS_MAP.get(self._state_class_cfg) if self._state_class_cfg else None
-
-    @property
-    def native_value(self) -> float | int | str | None:
+    def _computed_value(self) -> float | int | str | None:
         if not self._ice_enabled():
             return "Ej aktiverad"
         bundle = self.coordinator.ice_bundle()
         if not bundle:
-            return None
+            return "Ingen data"
         val = bundle.get(self._key)
         if val is None:
-            return None
+            return "Ingen data"
         if self._key in ("ice_station", "ice_observed_at", "ice_status"):
             return val
         try:
@@ -492,3 +480,29 @@ class SmhiIceSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
             return round(f, 1) if not float(f).is_integer() else int(f)
         except (TypeError, ValueError):
             return val
+
+    @property
+    def native_value(self) -> float | int | str | None:
+        return self._computed_value()
+
+    @property
+    def device_class(self):
+        if isinstance(self._computed_value(), str):
+            return None
+        return self._device_class
+
+    @property
+    def state_class(self):
+        if isinstance(self._computed_value(), str):
+            return None
+        return (
+            _STATE_CLASS_MAP.get(self._state_class_cfg)
+            if self._state_class_cfg
+            else None
+        )
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        if isinstance(self._computed_value(), str):
+            return None
+        return self._unit
