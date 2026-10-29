@@ -10,8 +10,11 @@ from aiohttp import ClientError, ClientSession
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
+
+STORAGE_VERSION = 1
 
 from .const import (
     API_FIRE_URL,
@@ -740,6 +743,41 @@ async def _obs_latest_value(
     return None, None
 
 
+
+def _valid_cloud_altitude(val: Any) -> float | None:
+    """Return altitude in metres or None if missing/sentinel (9999, -1, -9, …)."""
+    if val is None:
+        return None
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    if f in (9999.0, -1.0, -9.0, -8.0) or f < 0:
+        return None
+    return f
+
+
+def _cloud_altitude_from_series(
+    series: list[dict[str, Any]], key: str, now_ts: float
+) -> float | None:
+    """Nearest timeSeries point (any side of now) that has a valid cloud altitude."""
+    best_val: float | None = None
+    best_diff = float("inf")
+    for e in series:
+        if not e or "data" not in e:
+            continue
+        dt = dt_util.parse_datetime(e.get("time") or "")
+        if dt is None:
+            continue
+        val = _valid_cloud_altitude((e.get("data") or {}).get(key))
+        if val is None:
+            continue
+        diff = abs(dt.timestamp() - now_ts)
+        if diff < best_diff:
+            best_diff = diff
+            best_val = val
+    return best_val
+
 class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Fetch SMHI forecast; keep last good timeSeries on failure."""
 
@@ -764,6 +802,14 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.entry = entry
         self.session = session
         self._last_good: dict[str, Any] | None = None
+        # Hold last valid cloud altitudes so history has no gaps on SMHI 9999
+        self._last_cloud_base: float | None = None
+        self._last_cloud_top: float | None = None
+        # Persist cache across HA restarts (.storage/smhi_local.<entry_id>)
+        self._store = Store(
+            hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
+        )
+        self._cache_dirty = False
 
     @property
     def latitude(self) -> float:
@@ -772,6 +818,51 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @property
     def longitude(self) -> float:
         return float(self.entry.data[CONF_LONGITUDE])
+
+    async def async_load_cache(self) -> None:
+        """Restore last_good + cloud holds from disk (survives HA restart)."""
+        try:
+            data = await self._store.async_load()
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("SMHI Local: could not load persistent cache")
+            return
+        if not data or not isinstance(data, dict):
+            return
+        last_good = data.get("last_good")
+        if isinstance(last_good, dict) and last_good.get("timeSeries"):
+            self._last_good = last_good
+            _LOGGER.info(
+                "SMHI Local: restored forecast cache (%s points, saved %s)",
+                len(last_good.get("timeSeries") or []),
+                data.get("saved_at"),
+            )
+        base = data.get("last_cloud_base")
+        top = data.get("last_cloud_top")
+        try:
+            self._last_cloud_base = float(base) if base is not None else None
+        except (TypeError, ValueError):
+            self._last_cloud_base = None
+        try:
+            self._last_cloud_top = float(top) if top is not None else None
+        except (TypeError, ValueError):
+            self._last_cloud_top = None
+
+    async def async_save_cache(self) -> None:
+        """Write last_good + cloud holds to disk."""
+        if self._last_good is None and self._last_cloud_base is None:
+            return
+        payload = {
+            "saved_at": dt_util.utcnow().isoformat(),
+            "last_good": self._last_good,
+            "last_cloud_base": self._last_cloud_base,
+            "last_cloud_top": self._last_cloud_top,
+        }
+        try:
+            await self._store.async_save(payload)
+            self._cache_dirty = False
+            _LOGGER.debug("SMHI Local: persistent cache saved")
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("SMHI Local: could not save persistent cache")
 
     def _nearest_entry(
         self, series: list[dict[str, Any]]
@@ -846,6 +937,29 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raw_data[dst] = None
             else:
                 raw_data[dst] = None
+        # Cloud base/top: SMHI uses 9999 when missing → hold last good to avoid history gaps
+        now_ts = dt_util.now().timestamp()
+        base = _valid_cloud_altitude(raw_data.get("cloud_base_altitude"))
+        top = _valid_cloud_altitude(raw_data.get("cloud_top_altitude"))
+        if base is None:
+            base = _cloud_altitude_from_series(series, "cloud_base_altitude", now_ts)
+        if top is None:
+            top = _cloud_altitude_from_series(series, "cloud_top_altitude", now_ts)
+        if base is None:
+            base = self._last_cloud_base
+        if top is None:
+            top = self._last_cloud_top
+        if base is not None:
+            self._last_cloud_base = base
+            raw_data["cloud_base_altitude"] = base
+        else:
+            raw_data["cloud_base_altitude"] = None
+        if top is not None:
+            self._last_cloud_top = top
+            raw_data["cloud_top_altitude"] = top
+        else:
+            raw_data["cloud_top_altitude"] = None
+
         raw_data["cloud_type"] = _cloud_type(raw_data)
         raw_data["wind_direction_sv"] = _wind_direction_sv(
             raw_data.get("wind_from_direction")
@@ -1096,6 +1210,7 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # --- Cache: all successful layers live in _last_good ---
         if snow_ok:
             self._last_good = result
+            await self.async_save_cache()
             return result
 
         if self._last_good:
@@ -1110,6 +1225,7 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 merged["ice"] = result["ice"]
             merged["fetched_at"] = result["fetched_at"]
             self._last_good = merged
+            await self.async_save_cache()
             return merged
 
         raise UpdateFailed("SMHI snow1g unavailable and no cached forecast")

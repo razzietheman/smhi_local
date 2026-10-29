@@ -23,6 +23,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmhiConfigEntry) -> bool
     """Set up SMHI Local from a config entry."""
     session = async_get_clientsession(hass)
     coordinator = SmhiLocalCoordinator(hass, entry, session)
+    await coordinator.async_load_cache()
 
     try:
         await coordinator.async_config_entry_first_refresh()
