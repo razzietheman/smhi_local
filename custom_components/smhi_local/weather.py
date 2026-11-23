@@ -21,7 +21,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_NAME, DEFAULT_NAME, DOMAIN
+from .const import CACHE_MAX_AGE_MINUTES, CONF_NAME, DEFAULT_NAME, DOMAIN
 from .coordinator import SmhiLocalCoordinator, _is_night, _symbol_to_condition
 
 
@@ -73,6 +73,21 @@ class SmhiWeatherEntity(CoordinatorEntity[SmhiLocalCoordinator], WeatherEntity):
         return self.coordinator.current_bundle()
 
     @property
+    def available(self) -> bool:
+        """Do not present stale cached weather as current."""
+        return super().available and not self.coordinator.data_is_stale
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        status = self.coordinator.status_bundle()
+        return {
+            "data_status": status.get("data_status"),
+            "last_success_at": status.get("data_status_last_success"),
+            "fetched_at": status.get("data_status_fetched_at"),
+            "cache_ttl_minutes": CACHE_MAX_AGE_MINUTES,
+        }
+
+    @property
     def condition(self) -> str | None:
         return self._bundle().get("condition") or "cloudy"
 
@@ -113,7 +128,7 @@ class SmhiWeatherEntity(CoordinatorEntity[SmhiLocalCoordinator], WeatherEntity):
 
     async def async_forecast_hourly(self) -> list[Forecast] | None:
         """Hourly forecast from timeSeries (from ~now)."""
-        data = self.coordinator.data or {}
+        data = self.coordinator.source_data
         series = data.get("timeSeries") or []
         if not series:
             return None
@@ -152,18 +167,19 @@ class SmhiWeatherEntity(CoordinatorEntity[SmhiLocalCoordinator], WeatherEntity):
         return out
 
     async def async_forecast_daily(self) -> list[Forecast] | None:
-        """Daily min/max aggregated from hourly points."""
-        data = self.coordinator.data or {}
+        """Daily min/max aggregated from hourly points from now onwards."""
+        data = self.coordinator.source_data
         series = data.get("timeSeries") or []
         if not series:
             return None
 
+        now_ts = dt_util.now().timestamp()
         days: dict[str, dict[str, Any]] = {}
         for e in series:
             if not e or "time" not in e or "data" not in e:
                 continue
             dt = dt_util.parse_datetime(e["time"])
-            if dt is None:
+            if dt is None or dt.timestamp() < now_ts - 1800:
                 continue
             local = dt_util.as_local(dt)
             key = local.date().isoformat()

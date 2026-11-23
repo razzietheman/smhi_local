@@ -28,6 +28,17 @@ OCEAN_BASE = "https://opendata-download-ocobs.smhi.se/api/version/1.0"
 DEFAULT_NAME = "SMHI"
 DEFAULT_UPDATE_INTERVAL = 300  # seconds
 
+# Freshness / cache policy. After this age the cached forecast is considered
+# stale and entities using it become unavailable (the status sensor stays up).
+CACHE_MAX_AGE_MINUTES = 360  # 6 h
+# Cloud base/top fallback is only allowed from points near "now", never from
+# arbitrary forecast points days away.
+CLOUD_LOOKAHEAD_MINUTES = 180  # 3 h
+
+DATA_STATUS_CURRENT = "Aktuell"
+DATA_STATUS_STALE = "Gammal data"
+DATA_STATUS_NONE = "Ingen data"
+
 # SMHI SNOW1g (pmp3g retired 2026-03-31)
 API_URL = (
     "https://opendata-download-metfcst.smhi.se/api/category/snow1g"
@@ -617,6 +628,17 @@ WATER_SENSOR_TYPES: tuple[dict, ...] = (
         "device_class": "distance",
         "state_class": "measurement",
         "icon": "mdi:map-marker-distance",
+    },
+)
+
+DATA_STATUS_SENSOR_TYPES: tuple[dict, ...] = (
+    {
+        "key": "data_status",
+        "name": "Datastatus",
+        "unit": None,
+        "device_class": None,
+        "state_class": None,
+        "icon": "mdi:database-check",
     },
 )
 

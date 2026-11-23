@@ -19,6 +19,7 @@ from .const import (
     CONF_ENABLE_WATER,
     CONF_ENABLE_ICE,
     CONF_WATER_SOURCE,
+    DATA_STATUS_SENSOR_TYPES,
     DEFAULT_NAME,
     DERIVED_SENSOR_TYPES,
     DOMAIN,
@@ -81,8 +82,20 @@ async def async_setup_entry(
         SmhiIceSensor(coordinator, entry, name, desc)
         for desc in ICE_SENSOR_TYPES
     )
+    entities.extend(
+        SmhiStatusSensor(coordinator, entry, name, desc)
+        for desc in DATA_STATUS_SENSOR_TYPES
+    )
     entities.append(SmhiCurrentSensor(coordinator, entry, name))
     async_add_entities(entities)
+
+
+class SmhiEntity(CoordinatorEntity[SmhiLocalCoordinator]):
+    """Base entity: hide stale cached data, keep the status sensor available."""
+
+    @property
+    def available(self) -> bool:
+        return super().available and not self.coordinator.data_is_stale
 
 
 def _device_info(entry: ConfigEntry, device_name: str) -> DeviceInfo:
@@ -96,7 +109,7 @@ def _device_info(entry: ConfigEntry, device_name: str) -> DeviceInfo:
     )
 
 
-class SmhiFieldSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+class SmhiFieldSensor(SmhiEntity, SensorEntity):
     """Single field from nearest SMHI timeSeries point."""
 
     _attr_has_entity_name = False
@@ -142,18 +155,23 @@ class SmhiFieldSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Degrees for wind direction label."""
-        if self._key != "wind_direction_sv":
-            return {}
+        """Degrees for wind direction, source flag for cloud altitudes."""
         bundle = self.coordinator.current_bundle()
-        deg = bundle.get("wind_from_direction")
-        try:
-            return {"degrees": round(float(deg), 1)} if deg is not None else {}
-        except (TypeError, ValueError):
-            return {}
+        if self._key == "wind_direction_sv":
+            deg = bundle.get("wind_from_direction")
+            try:
+                return {"degrees": round(float(deg), 1)} if deg is not None else {}
+            except (TypeError, ValueError):
+                return {}
+        if self._key in ("cloud_base_altitude", "cloud_top_altitude"):
+            return {
+                "estimated": bool(bundle.get(f"{self._key}_estimated")),
+                "source": bundle.get("cloud_altitude_source"),
+            }
+        return {}
 
 
-class SmhiDerivedSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+class SmhiDerivedSensor(SmhiEntity, SensorEntity):
     """Sensor derived by scanning the full forecast series."""
 
     _attr_has_entity_name = False
@@ -207,7 +225,7 @@ class SmhiDerivedSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         return {}
 
 
-class SmhiCurrentSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+class SmhiCurrentSensor(SmhiEntity, SensorEntity):
     """Summary sensor: state = symbol_code, attributes = all current fields."""
 
     _attr_has_entity_name = False
@@ -262,7 +280,7 @@ class SmhiCurrentSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
 
 
 
-class SmhiMetaSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+class SmhiMetaSensor(SmhiEntity, SensorEntity):
     """Forecast metadata (created time, grid point)."""
 
     _attr_has_entity_name = False
@@ -286,7 +304,7 @@ class SmhiMetaSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         return self.coordinator.meta_bundle().get(self._key)
 
 
-class SmhiFireSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+class SmhiFireSensor(SmhiEntity, SensorEntity):
     """Fire weather index sensors (fwif1g daily)."""
 
     _attr_has_entity_name = False
@@ -325,7 +343,7 @@ class SmhiFireSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
             return val
 
 
-class SmhiWarningSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+class SmhiWarningSensor(SmhiEntity, SensorEntity):
     """IBWW weather warnings summary."""
 
     _attr_has_entity_name = False
@@ -359,7 +377,7 @@ class SmhiWarningSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         return {"warnings": bundle.get("warnings_list") or []}
 
 
-class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+class SmhiWaterSensor(SmhiEntity, SensorEntity):
     """Optional hydro/ocean observation sensors."""
 
     _attr_has_entity_name = False
@@ -437,7 +455,7 @@ class SmhiWaterSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         return self._unit
 
 
-class SmhiIceSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+class SmhiIceSensor(SmhiEntity, SensorEntity):
     """Optional ice observation sensors (hydroobs, seasonal)."""
 
     _attr_has_entity_name = False
@@ -506,3 +524,42 @@ class SmhiIceSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
         if isinstance(self._computed_value(), str):
             return None
         return self._unit
+
+
+class SmhiStatusSensor(CoordinatorEntity[SmhiLocalCoordinator], SensorEntity):
+    """Data freshness sensor – stays available even when data is stale.
+
+    ``fetched_at`` is the last poll; ``last_success_at`` is the last time the
+    forecast itself was actually fetched successfully.
+    """
+
+    _attr_has_entity_name = False
+
+    def __init__(
+        self,
+        coordinator: SmhiLocalCoordinator,
+        entry: ConfigEntry,
+        device_name: str,
+        desc: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator)
+        self._attr_name = desc["name"]
+        self._attr_unique_id = f"{entry.entry_id}_{desc['key']}"
+        self._attr_icon = desc.get("icon")
+        self._attr_device_info = _device_info(entry, device_name)
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.status_bundle().get("data_status")
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        bundle = self.coordinator.status_bundle()
+        return {
+            "last_success_at": bundle.get("data_status_last_success"),
+            "last_success_at_iso": bundle.get("data_status_last_success_iso"),
+            "fetched_at": bundle.get("data_status_fetched_at"),
+            "fetched_at_iso": bundle.get("data_status_fetched_at_iso"),
+            "age_minutes": bundle.get("data_status_age_minutes"),
+            "ttl_minutes": bundle.get("data_status_ttl_minutes"),
+        }

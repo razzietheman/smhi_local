@@ -21,6 +21,11 @@ from .const import (
     API_URL,
     API_WARNINGS_URL,
     BAD_VISIBILITY_KM,
+    CACHE_MAX_AGE_MINUTES,
+    CLOUD_LOOKAHEAD_MINUTES,
+    DATA_STATUS_CURRENT,
+    DATA_STATUS_NONE,
+    DATA_STATUS_STALE,
     CONF_LATITUDE,
     CONF_LONGITUDE,
     CONF_UPDATE_INTERVAL,
@@ -44,7 +49,6 @@ from .const import (
     WATER_SOURCE_OFF,
     HYDRO_BASE,
     OCEAN_BASE,
-    guess_county,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -168,15 +172,22 @@ def _feels_like(
         return float(temp)
 
 
-def _is_night(dt: Any, hass: HomeAssistant) -> bool:
-    """Night from sun.sun elevation when possible."""
+def _is_night(dt: Any, hass: HomeAssistant | None) -> bool:
+    """Night for *this forecast timestamp* (not the current sun state).
+
+    HA's ``is_up`` helper uses astral for the given point in time, so hourly
+    and daily forecasts get correct clear-night/sunny conditions.
+    """
+    if dt is None:
+        hour = dt_util.now().hour
+        return hour < 6 or hour >= 21
     try:
-        elev = hass.states.get("sun.sun")
-        if elev is not None and elev.state in ("below_horizon", "above_horizon"):
-            return elev.state == "below_horizon"
-    except Exception:  # noqa: BLE001
-        pass
-    hour = dt_util.as_local(dt).hour if dt else dt_util.now().hour
+        from homeassistant.helpers.sun import is_up  # HA core dependency
+
+        return not is_up(hass, dt_util.as_utc(dt))
+    except Exception as ex:  # noqa: BLE001
+        _LOGGER.debug("SMHI Local: sun calculation unavailable (%s)", ex)
+    hour = dt_util.as_local(dt).hour
     return hour < 6 or hour >= 21
 
 
@@ -351,48 +362,6 @@ def _cloud_type(data: dict[str, Any]) -> str:
 
 
 def _wind_direction_sv(degrees: float | None) -> str:
-    """Degrees → Swedish compass label (same bands as template)."""
-    if degrees is None:
-        return "Okänt"
-    try:
-        d = float(degrees) % 360
-    except (TypeError, ValueError):
-        return "Okänt"
-    if d >= 348.75 or d < 11.25:
-        return "Nord"
-    if d < 33.75:
-        return "Nord-Nordost"
-    if d < 56.25:
-        return "Nordost"
-    if d < 78.75:
-        return "Ost-Nordost"
-    if d < 101.25:
-        return "Ost"
-    if d < 123.75:
-        return "Ost-Sydost"
-    if d < 146.25:
-        return "Sydost"
-    if d < 168.75:
-        return "Syd-Sydost"
-    if d < 191.25:
-        return "Syd"
-    if d < 213.75:
-        return "Syd-Sydväst"
-    if d < 236.25:
-        return "Sydväst"
-    if d < 258.75:
-        return "Väst-Sydväst"
-    if d < 281.25:
-        return "Väst"
-    if d < 303.75:
-        return "Väst-Nordväst"
-    if d < 326.25:
-        return "Nordväst"
-    return "Nord-Nordväst"
-
-
-
-def _wind_direction_sv(degrees: float | None) -> str:
     """Bearing → Swedish compass label (16-point)."""
     if degrees is None:
         return "Okänt"
@@ -509,9 +478,7 @@ def _format_datum_kl(iso: str) -> str:
 
 def _visibility_text(vis: float, iso: str) -> str:
     label = _visibility_label(vis)
-    # Show one decimal if needed, else strip trailing .0
-    vis_s = f"{vis:.1f}".rstrip("0").rstrip(".") if vis != int(vis) else str(int(vis))
-    # Match template style: always one decimal when float from API often is
+    # Match template style: integers without decimals, fractions with one.
     vis_s = f"{vis:g}" if vis == int(vis) else f"{vis:.1f}"
     return f"{label} ({vis_s} km), {_format_datum_kl(iso)}"
 
@@ -590,9 +557,11 @@ async def _obs_station_periods(
     try:
         async with session.get(st_url, timeout=20) as resp:
             if resp.status != 200:
+                _LOGGER.debug("SMHI station periods %s: HTTP %s", st_url, resp.status)
                 return []
             st = await resp.json()
-    except Exception:  # noqa: BLE001
+    except Exception as ex:  # noqa: BLE001
+        _LOGGER.warning("SMHI station periods %s failed: %s", st_url, ex)
         return []
     return [p.get("key") for p in (st.get("period") or []) if p.get("key")]
 
@@ -616,9 +585,11 @@ async def _obs_nearest_station(
     try:
         async with session.get(url, timeout=25) as resp:
             if resp.status != 200:
+                _LOGGER.warning("SMHI station list %s: HTTP %s", url, resp.status)
                 return None
             payload = await resp.json()
-    except Exception:  # noqa: BLE001
+    except Exception as ex:  # noqa: BLE001
+        _LOGGER.warning("SMHI station list %s failed: %s", url, ex)
         return None
     stations = payload.get("station") or []
     if manual_id:
@@ -636,6 +607,11 @@ async def _obs_nearest_station(
                 except (KeyError, TypeError, ValueError):
                     s["_distance_km"] = None
                 return s
+        # Never silently substitute another station for an explicit user choice.
+        _LOGGER.warning(
+            "SMHI station ID %s not found for parameter %s at %s", mid, parameter, base
+        )
+        return None
 
     candidates: list[tuple[float, dict[str, Any]]] = []
     for s in stations:
@@ -704,9 +680,11 @@ async def _obs_latest_value(
     try:
         async with session.get(st_url, timeout=20) as resp:
             if resp.status != 200:
+                _LOGGER.debug("SMHI observation %s: HTTP %s", st_url, resp.status)
                 return None, None
             st = await resp.json()
-    except Exception:  # noqa: BLE001
+    except Exception as ex:  # noqa: BLE001
+        _LOGGER.warning("SMHI observation %s failed: %s", st_url, ex)
         return None, None
     periods = [p.get("key") for p in (st.get("period") or []) if p.get("key")]
     order = ["latest-hour", "latest-day", "latest-months"]
@@ -722,9 +700,11 @@ async def _obs_latest_value(
         try:
             async with session.get(data_url, timeout=30) as resp:
                 if resp.status != 200:
+                    _LOGGER.debug("SMHI observation data %s: HTTP %s", data_url, resp.status)
                     continue
                 payload = await resp.json()
-        except Exception:  # noqa: BLE001
+        except Exception as ex:  # noqa: BLE001
+            _LOGGER.warning("SMHI observation data %s failed: %s", data_url, ex)
             continue
         values = payload.get("value") or []
         if not values:
@@ -758,9 +738,12 @@ def _valid_cloud_altitude(val: Any) -> float | None:
 
 
 def _cloud_altitude_from_series(
-    series: list[dict[str, Any]], key: str, now_ts: float
+    series: list[dict[str, Any]],
+    key: str,
+    now_ts: float,
+    window_seconds: float = CLOUD_LOOKAHEAD_MINUTES * 60,
 ) -> float | None:
-    """Nearest timeSeries point (any side of now) that has a valid cloud altitude."""
+    """Nearest timeSeries point within a limited window with a valid altitude."""
     best_val: float | None = None
     best_diff = float("inf")
     for e in series:
@@ -769,14 +752,47 @@ def _cloud_altitude_from_series(
         dt = dt_util.parse_datetime(e.get("time") or "")
         if dt is None:
             continue
+        diff = abs(dt.timestamp() - now_ts)
+        if diff > window_seconds:
+            continue
         val = _valid_cloud_altitude((e.get("data") or {}).get(key))
         if val is None:
             continue
-        diff = abs(dt.timestamp() - now_ts)
         if diff < best_diff:
             best_diff = diff
             best_val = val
     return best_val
+
+def _data_is_stale(data: dict[str, Any] | None) -> bool:
+    """True when no forecast exists or the last successful fetch is too old."""
+    if not data or not data.get("timeSeries"):
+        return True
+    stamp = data.get("last_success_at") or data.get("fetched_at")
+    if not stamp:
+        return True
+    dt = dt_util.parse_datetime(stamp)
+    if dt is None:
+        return True
+    try:
+        age = (dt_util.utcnow() - dt_util.as_utc(dt)).total_seconds()
+    except Exception:  # noqa: BLE001
+        return True
+    return age > CACHE_MAX_AGE_MINUTES * 60
+
+
+def _cache_age_minutes(data: dict[str, Any] | None) -> int | None:
+    """Age of the last successful forecast fetch, in whole minutes."""
+    if not data:
+        return None
+    stamp = data.get("last_success_at") or data.get("fetched_at")
+    dt = dt_util.parse_datetime(stamp) if stamp else None
+    if dt is None:
+        return None
+    try:
+        return max(0, int((dt_util.utcnow() - dt_util.as_utc(dt)).total_seconds() // 60))
+    except Exception:  # noqa: BLE001
+        return None
+
 
 class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Fetch SMHI forecast; keep last good timeSeries on failure."""
@@ -809,7 +825,16 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._store = Store(
             hass, STORAGE_VERSION, f"{DOMAIN}.{entry.entry_id}"
         )
-        self._cache_dirty = False
+
+    @property
+    def source_data(self) -> dict[str, Any]:
+        """Raw data (live or cached) used as input for all bundles."""
+        return self.data or self._last_good or {}
+
+    @property
+    def data_is_stale(self) -> bool:
+        """Cached forecast older than CACHE_MAX_AGE_MINUTES."""
+        return _data_is_stale(self.source_data)
 
     @property
     def latitude(self) -> float:
@@ -848,18 +873,22 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_cloud_top = None
 
     async def async_save_cache(self) -> None:
-        """Write last_good + cloud holds to disk."""
+        """Write last_good + cloud holds to disk (without derived bundles)."""
         if self._last_good is None and self._last_cloud_base is None:
             return
+        last_good = {
+            key: value
+            for key, value in self._last_good.items()
+            if key != "_bundles"
+        } if self._last_good else None
         payload = {
             "saved_at": dt_util.utcnow().isoformat(),
-            "last_good": self._last_good,
+            "last_good": last_good,
             "last_cloud_base": self._last_cloud_base,
             "last_cloud_top": self._last_cloud_top,
         }
         try:
             await self._store.async_save(payload)
-            self._cache_dirty = False
             _LOGGER.debug("SMHI Local: persistent cache saved")
         except Exception:  # noqa: BLE001
             _LOGGER.exception("SMHI Local: could not save persistent cache")
@@ -883,9 +912,39 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 best = e
         return best
 
+    def _cached_bundle(self, name: str, compute) -> dict[str, Any]:
+        """Return a bundle computed once per coordinator update."""
+        data = self.source_data
+        bundles = data.get("_bundles") or {}
+        if isinstance(bundles.get(name), dict):
+            return bundles[name]
+        return compute(data)
+
     def current_bundle(self) -> dict[str, Any]:
         """Current values + condition from nearest point."""
-        data = self.data or self._last_good or {}
+        return self._cached_bundle("current", self._compute_current)
+
+    def _resolve_cloud_altitude(
+        self,
+        raw_data: dict[str, Any],
+        series: list[dict[str, Any]],
+        key: str,
+        now_ts: float,
+    ) -> tuple[float | None, str]:
+        """Current value, else nearby series value, else held value."""
+        val = _valid_cloud_altitude(raw_data.get(key))
+        if val is not None:
+            return val, "current"
+        val = _cloud_altitude_from_series(series, key, now_ts)
+        if val is not None:
+            return val, "series"
+        held = self._last_cloud_base if key == "cloud_base_altitude" else self._last_cloud_top
+        if held is not None:
+            return held, "cache"
+        return None, "none"
+
+    def _compute_current(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Compute current values + condition from nearest point."""
         series = data.get("timeSeries") or []
         entry = self._nearest_entry(series)
         if not entry:
@@ -937,28 +996,25 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     raw_data[dst] = None
             else:
                 raw_data[dst] = None
-        # Cloud base/top: SMHI uses 9999 when missing → hold last good to avoid history gaps
+        # Cloud base/top: SMHI uses 9999 when missing. Fall back only to points
+        # within CLOUD_LOOKAHEAD_MINUTES, then to the last held value, and mark
+        # the result as estimated so users can see it is not a direct reading.
         now_ts = dt_util.now().timestamp()
-        base = _valid_cloud_altitude(raw_data.get("cloud_base_altitude"))
-        top = _valid_cloud_altitude(raw_data.get("cloud_top_altitude"))
-        if base is None:
-            base = _cloud_altitude_from_series(series, "cloud_base_altitude", now_ts)
-        if top is None:
-            top = _cloud_altitude_from_series(series, "cloud_top_altitude", now_ts)
-        if base is None:
-            base = self._last_cloud_base
-        if top is None:
-            top = self._last_cloud_top
+        base, base_source = self._resolve_cloud_altitude(
+            raw_data, series, "cloud_base_altitude", now_ts
+        )
+        top, top_source = self._resolve_cloud_altitude(
+            raw_data, series, "cloud_top_altitude", now_ts
+        )
+        raw_data["cloud_base_altitude"] = base
+        raw_data["cloud_top_altitude"] = top
+        raw_data["cloud_base_altitude_estimated"] = base_source != "current"
+        raw_data["cloud_top_altitude_estimated"] = top_source != "current"
+        raw_data["cloud_altitude_source"] = f"{base_source}/{top_source}"
         if base is not None:
             self._last_cloud_base = base
-            raw_data["cloud_base_altitude"] = base
-        else:
-            raw_data["cloud_base_altitude"] = None
         if top is not None:
             self._last_cloud_top = top
-            raw_data["cloud_top_altitude"] = top
-        else:
-            raw_data["cloud_top_altitude"] = None
 
         raw_data["cloud_type"] = _cloud_type(raw_data)
         raw_data["wind_direction_sv"] = _wind_direction_sv(
@@ -968,7 +1024,10 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def derived_bundle(self) -> dict[str, Any]:
         """Scan future series for next precip, 12h sum, thunder, bad visibility."""
-        data = self.data or self._last_good or {}
+        return self._cached_bundle("derived", self._compute_derived)
+
+    def _compute_derived(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Compute derived sensors from the full timeSeries."""
         series = data.get("timeSeries") or []
         now_ts = dt_util.now().timestamp()
         horizon_12h = now_ts + 12 * 3600
@@ -1064,8 +1123,22 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         return result
 
+    def _finalize(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Compute all entity bundles once, after every layer is resolved."""
+        data["_bundles"] = {
+            "current": self._compute_current(data),
+            "derived": self._compute_derived(data),
+            "meta": self._compute_meta(data),
+            "fire": self._compute_fire(data),
+            "warnings": self._compute_warnings(data),
+            "water": self._compute_water(data),
+            "ice": self._compute_ice(data),
+            "status": self._compute_status(data),
+        }
+        return data
+
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch snow1g + fire + warnings; keep last good on failure."""
+        """Fetch all layers; preserve last good per layer on failure."""
         lat = round(self.latitude, 4)
         lon = round(self.longitude, 4)
         url = API_URL.format(lat=lat, lon=lon)
@@ -1084,6 +1157,7 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "geometry": None,
             "fire": None,
             "warnings": [],
+            "last_success_at": None,
         }
 
         # --- snow1g ---
@@ -1153,7 +1227,11 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "geometry": payload.get("geometry"),
                         "data": fire_data,
                     }
-                    fire_ok = True
+                    fire_ok = any(
+                        key != "validTime" for key in fire_data
+                    )
+                    if not fire_ok:
+                        _LOGGER.debug("SMHI fire response contained no usable parameters")
         except ClientError as ex:
             _LOGGER.warning("SMHI fire network error: %s", ex)
         except Exception:  # noqa: BLE001
@@ -1190,7 +1268,10 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     lat, lon, water_source, manual_id
                 )
                 result["water"] = water
-                water_ok = water is not None
+                water_ok = bool(water) and any(
+                    water.get(key) is not None
+                    for key in ("water_level", "water_temperature", "wave_height")
+                )
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("SMHI water observations failed")
 
@@ -1203,36 +1284,53 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 ice = await self._async_fetch_ice(lat, lon, ice_manual)
                 result["ice"] = ice
-                ice_ok = ice is not None
+                ice_ok = bool(ice) and ice.get("ice_thickness") is not None
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("SMHI ice observations failed")
 
-        # --- Cache: all successful layers live in _last_good ---
+        # --- Resolve every layer independently, keeping the last good value ---
+        previous = dict(self._last_good or {})
+        layer_ok = {
+            "fire": fire_ok,
+            "warnings": warn_ok,
+            "water": water_ok,
+            "ice": ice_ok,
+        }
+        for key, ok in layer_ok.items():
+            if ok:
+                result[f"last_{key}_success_at"] = result["fetched_at"]
+            else:
+                result[key] = previous.get(key, result.get(key))
+                result[f"last_{key}_success_at"] = previous.get(
+                    f"last_{key}_success_at"
+                )
+
         if snow_ok:
-            self._last_good = result
-            await self.async_save_cache()
-            return result
+            final = dict(result)
+            final["last_success_at"] = result["fetched_at"]
+        else:
+            if not previous:
+                raise UpdateFailed("SMHI snow1g unavailable and no cached forecast")
+            final = dict(previous)
+            for key, ok in layer_ok.items():
+                if ok:
+                    final[key] = result[key]
+                    final[f"last_{key}_success_at"] = result[f"last_{key}_success_at"]
+            # last_success_at deliberately stays at the last snow1g success.
+            final["fetched_at"] = result["fetched_at"]
+            final["latitude"] = lat
+            final["longitude"] = lon
 
-        if self._last_good:
-            merged = dict(self._last_good)
-            if fire_ok:
-                merged["fire"] = result["fire"]
-            if warn_ok:
-                merged["warnings"] = result["warnings"]
-            if water_ok and result.get("water") is not None:
-                merged["water"] = result["water"]
-            if ice_ok and result.get("ice") is not None:
-                merged["ice"] = result["ice"]
-            merged["fetched_at"] = result["fetched_at"]
-            self._last_good = merged
-            await self.async_save_cache()
-            return merged
-
-        raise UpdateFailed("SMHI snow1g unavailable and no cached forecast")
+        self._last_good = self._finalize(final)
+        await self.async_save_cache()
+        return self._last_good
 
     def meta_bundle(self) -> dict[str, Any]:
         """Forecast metadata for sensors."""
-        data = self.data or self._last_good or {}
+        return self._cached_bundle("meta", self._compute_meta)
+
+    def _compute_meta(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Compute forecast metadata."""
         created = data.get("createdTime")
         ref = data.get("referenceTime")
         geom = data.get("geometry") or {}
@@ -1257,7 +1355,10 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def fire_bundle(self) -> dict[str, Any]:
         """Fire weather indices for nearest day."""
-        data = self.data or self._last_good or {}
+        return self._cached_bundle("fire", self._compute_fire)
+
+    def _compute_fire(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Compute fire weather indices."""
         fire = data.get("fire") or {}
         d = dict(fire.get("data") or {})
         try:
@@ -1289,13 +1390,16 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return None
 
     def warnings_bundle(self) -> dict[str, Any]:
-        """IBWW warnings relevant to the configured point (polygon test).
+        """IBWW warnings relevant to the configured point."""
+        return self._cached_bundle("warnings", self._compute_warnings)
 
-        Default: only warning areas whose GeoJSON polygon contains lat/lon.
-        Option warning_area=all: every active warning in Sweden.
-        Option warning_area=<name>: geometry hit OR name match (legacy).
+    def _compute_warnings(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Filter IBWW warnings.
+
+        Default: only areas whose GeoJSON polygon contains lat/lon.
+        warning_area=all: every active warning in Sweden.
+        warning_area=<name>: geometry hit OR name match.
         """
-        data = self.data or self._last_good or {}
         warnings = data.get("warnings") or []
         area_opt = self._warning_area_filter()
         show_all = area_opt == WARNING_AREA_ALL
@@ -1312,10 +1416,7 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "filter_mode": "all" if show_all else "point_in_polygon",
             }
 
-        level_rank = {"RED": 4, "ORANGE": 3, "YELLOW": 2, "MESSAGE": 1}
         items: list[dict[str, Any]] = []
-        max_rank = 0
-        max_label = "Meddelande"
 
         for w in warnings:
             event = (
@@ -1332,31 +1433,25 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if isinstance(x, dict)
                 )
                 geom = (a.get("area") or {}).get("geometry")
+                inside = bool(geom and _point_in_geometry(lon, lat, geom))
 
                 if not show_all:
-                    inside = _point_in_geometry(lon, lat, geom) if geom else False
-                    if geom:
-                        if not inside:
+                    name_hit = bool(
+                        name_filter
+                        and name_filter in f"{area_name} {affected_names}".lower()
+                    )
+                    if name_filter:
+                        # Documented OR semantics: polygon hit or name match.
+                        if not (inside or name_hit):
                             continue
-                    else:
-                        # No polygon – optional name fallback only
-                        if name_filter:
-                            hay = f"{area_name} {affected_names}".lower()
-                            if name_filter not in hay:
-                                continue
-                        else:
-                            # Strict geometry mode without polygon: skip
-                            continue
-                    # If name_filter set together with geometry: already inside; keep
+                    elif not inside:
+                        # Default: strict point-in-polygon (no polygon → skip).
+                        continue
                 # show_all: keep every area
 
                 lvl = a.get("warningLevel") or {}
                 code = lvl.get("code") or "MESSAGE"
                 label = lvl.get("sv") or lvl.get("en") or code
-                rank = level_rank.get(code, 0)
-                if rank > max_rank:
-                    max_rank = rank
-                    max_label = label
                 items.append(
                     {
                         "event": event,
@@ -1364,7 +1459,7 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "level_code": code,
                         "area": area_name,
                         "id": a.get("id"),
-                        "in_polygon": bool(geom and _point_in_geometry(lon, lat, geom)),
+                        "in_polygon": inside,
                     }
                 )
 
@@ -1510,7 +1605,10 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def water_bundle(self) -> dict[str, Any]:
         """Latest water observation fields for sensors."""
-        data = self.data or self._last_good or {}
+        return self._cached_bundle("water", self._compute_water)
+
+    def _compute_water(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Compute water observation fields."""
         return dict(data.get("water") or {})
 
     async def _async_fetch_ice(
@@ -1541,7 +1639,6 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         out["ice_thickness"] = thickness
         if date_ms:
             try:
-                from homeassistant.util import dt as dt_util
                 observed = dt_util.utc_from_timestamp(date_ms / 1000.0)
                 local = dt_util.as_local(observed)
                 out["ice_observed_at"] = local.strftime("%Y-%m-%d %H:%M")
@@ -1560,6 +1657,30 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return out
 
     def ice_bundle(self) -> dict[str, Any]:
-        data = self.data or self._last_good or {}
+        return self._cached_bundle("ice", self._compute_ice)
+
+    def _compute_ice(self, data: dict[str, Any]) -> dict[str, Any]:
         return dict(data.get("ice") or {})
+
+    def status_bundle(self) -> dict[str, Any]:
+        """Freshness/status for the dedicated status sensor."""
+        return self._cached_bundle("status", self._compute_status)
+
+    def _compute_status(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Compute data status, age and original success timestamps."""
+        if not data.get("timeSeries"):
+            status = DATA_STATUS_NONE
+        elif _data_is_stale(data):
+            status = DATA_STATUS_STALE
+        else:
+            status = DATA_STATUS_CURRENT
+        return {
+            "data_status": status,
+            "data_status_last_success": _format_local_time(data.get("last_success_at")),
+            "data_status_fetched_at": _format_local_time(data.get("fetched_at")),
+            "data_status_age_minutes": _cache_age_minutes(data),
+            "data_status_ttl_minutes": CACHE_MAX_AGE_MINUTES,
+            "data_status_last_success_iso": data.get("last_success_at"),
+            "data_status_fetched_at_iso": data.get("fetched_at"),
+        }
 

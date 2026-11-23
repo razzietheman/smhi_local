@@ -22,12 +22,10 @@ from .const import (
     DEFAULT_NAME,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
-    WARNING_AREA_ALL,
     WATER_SOURCE_AUTO,
     WATER_SOURCE_HYDRO,
     WATER_SOURCE_OCEAN,
     WATER_SOURCE_OFF,
-    guess_county,
 )
 
 
@@ -95,6 +93,19 @@ class SmhiLocalConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class SmhiLocalOptionsFlow(config_entries.OptionsFlow):
     """Handle options."""
 
+    def _current_options(self) -> dict[str, Any]:
+        """Read options on both old and new Home Assistant versions.
+
+        ``OptionsFlow.config_entry`` was added in HA 2024.11. Older supported
+        releases use the config entry id as the flow handler instead.
+        """
+        entry = getattr(self, "config_entry", None)
+        if entry is None:
+            entries = getattr(getattr(self, "hass", None), "config_entries", None)
+            if entries is not None:
+                entry = entries.async_get_entry(self.handler)
+        return dict(entry.options) if entry is not None else {}
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -102,8 +113,7 @@ class SmhiLocalOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current = self.config_entry.options
-        data = self.config_entry.data
+        current = self._current_options()
         # Prefer empty warning filter (geometry mode) if previously set to a county
         warn_default = current.get(CONF_WARNING_AREA, "")
         return self.async_show_form(
