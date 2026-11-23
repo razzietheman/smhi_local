@@ -8,7 +8,7 @@ def test_manifest_version():
     data = json.loads(manifest.read_text(encoding="utf-8"))
     assert data["domain"] == "smhi_local"
     assert data["config_flow"] is True
-    assert data["version"] == "1.5.1"
+    assert data["version"] == "1.5.2"
 
 
 def test_const_imports():

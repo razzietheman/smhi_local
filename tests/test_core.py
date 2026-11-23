@@ -148,3 +148,72 @@ def test_data_is_stale_uses_last_success_and_ttl():
 
     age = coord_module._cache_age_minutes(stale)
     assert age is not None and age >= CACHE_MAX_AGE_MINUTES
+
+
+def local_iso(days_ahead: int, hour: int) -> str:
+    """ISO timestamp for a local date/hour (used by day-part tests)."""
+    base = dt.datetime.now().astimezone() + dt.timedelta(days=days_ahead)
+    return base.replace(hour=hour, minute=0, second=0, microsecond=0).isoformat()
+
+
+def test_relative_when_sv_uses_morgon_not_formiddag_at_six():
+    assert "bitti" in coord_module._relative_when_sv(local_iso(1, 6))
+    assert "förmiddag" not in coord_module._relative_when_sv(local_iso(1, 6))
+    assert "morgonen" in coord_module._relative_when_sv(local_iso(0, 7))
+    assert "förmiddag" in coord_module._relative_when_sv(local_iso(1, 10))
+    assert "eftermiddag" in coord_module._relative_when_sv(local_iso(1, 14))
+    assert "kväll" in coord_module._relative_when_sv(local_iso(1, 20))
+    assert "natt" in coord_module._relative_when_sv(local_iso(1, 3))
+
+
+def test_precip_event_value_requires_real_rain_not_only_ensemble_mean():
+    low_probability = {
+        "precipitation_amount_mean": 0.8,
+        "precipitation_amount_mean_deterministic": 0.0,
+        "precipitation_amount_median": 0.0,
+        "probability_of_precipitation": 6,
+    }
+    assert coord_module._precip_event_value(low_probability) is None
+
+    high_probability = {**low_probability, "probability_of_precipitation": 60}
+    assert coord_module._precip_event_value(high_probability) == 0.8
+
+    deterministic = {**low_probability, "precipitation_amount_mean_deterministic": 0.3}
+    assert coord_module._precip_event_value(deterministic) == 0.3
+
+
+def test_precip_period_text_ignores_low_probability_drizzle():
+    now_ts = dt.datetime.now(UTC).timestamp()
+    low_probability = {
+        "precipitation_amount_mean": 0.8,
+        "precipitation_amount_mean_deterministic": 0.0,
+        "precipitation_amount_median": 0.0,
+        "probability_of_precipitation": 6,
+    }
+    series = [
+        {"time": iso(60), "data": low_probability},
+        {"time": iso(120), "data": low_probability},
+        {"time": iso(180), "data": low_probability},
+    ]
+    assert coord_module._precip_period_text(series, now_ts) == "Ingen nederbörd"
+
+
+def test_precip_period_text_stops_at_first_dry_point():
+    now_ts = dt.datetime.now(UTC).timestamp()
+    wet = {"precipitation_amount_mean_deterministic": 0.3}
+    series = [
+        {"time": iso(60), "data": wet},
+        {"time": iso(120), "data": wet},
+        {"time": iso(180), "data": {}},  # dry → event ends
+        {"time": iso(240), "data": wet},  # must not extend the previous event
+    ]
+    text = coord_module._precip_period_text(series, now_ts)
+    times = [
+        coord_module.dt_util.as_local(
+            coord_module.dt_util.parse_datetime(e["time"])
+        ).strftime("%H:%M")
+        for e in series
+    ]
+    assert times[0] in text
+    assert times[1] in text
+    assert times[3] not in text

@@ -122,6 +122,9 @@ PARAM_MAP = {
 
 # Thresholds for derived sensors
 PRECIP_THRESHOLD_MM = 0.1
+# Ensemble mean alone is too optimistic: SMHI can show mean >= 0.1 mm with only
+# a few percent probability. Require this probability before calling it rain.
+PRECIP_PROBABILITY_THRESHOLD_PCT = 50
 BAD_VISIBILITY_KM = 10.0  # måttlig eller sämre (template < 10 km)
 
 # Precipitation category (pcat) → Swedish label

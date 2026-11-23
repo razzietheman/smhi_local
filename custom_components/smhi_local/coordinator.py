@@ -41,6 +41,7 @@ from .const import (
     GRASSFIRE_SV,
     PARAM_MAP,
     PCAT_LABELS,
+    PRECIP_PROBABILITY_THRESHOLD_PCT,
     PRECIP_THRESHOLD_MM,
     WARNING_AREA_ALL,
     WATER_SOURCE_AUTO,
@@ -242,6 +243,35 @@ def _snow_share_text(data: dict[str, Any]) -> str:
     return f"{spp_i}% snö"
 
 
+def _as_float(value: Any) -> float:
+    """Float or 0.0 for missing/invalid SMHI values."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _precip_event_value(data: dict[str, Any]) -> float | None:
+    """Amount for a real precipitation event, or None when it is just risk.
+
+    SMHI:s ensemble mean can be >= 0.1 mm with only a few percent probability
+    (light drizzle in a small share of the members). Using the mean alone made
+    "next precipitation" span five days. Prefer deterministic/median values and
+    accept the mean only when probability is high enough.
+    """
+    det = _as_float(data.get("precipitation_amount_mean_deterministic"))
+    med = _as_float(data.get("precipitation_amount_median"))
+    if det >= PRECIP_THRESHOLD_MM:
+        return det
+    if med >= PRECIP_THRESHOLD_MM:
+        return med
+    mean = _as_float(data.get("precipitation_amount_mean"))
+    prob = _as_float(data.get("probability_of_precipitation"))
+    if mean >= PRECIP_THRESHOLD_MM and prob >= PRECIP_PROBABILITY_THRESHOLD_PCT:
+        return mean
+    return None
+
+
 def _precip_period_text(series: list[dict[str, Any]], now_ts: float) -> str:
     """Start–stop range for next precip event (template Nästa Nederbördstid)."""
     start_iso = None
@@ -257,16 +287,13 @@ def _precip_period_text(series: list[dict[str, Any]], now_ts: float) -> str:
         ts = dt.timestamp()
         if ts < now_ts:
             continue
-        try:
-            tp = float((e.get("data") or {}).get("precipitation_amount_mean") or 0)
-        except (TypeError, ValueError):
-            tp = 0.0
-        if tp >= PRECIP_THRESHOLD_MM and not raining:
+        wet = _precip_event_value(e.get("data") or {}) is not None
+        if wet and not raining:
             start_iso = e["time"]
             raining = True
-        if raining and tp >= PRECIP_THRESHOLD_MM:
+        if raining and wet:
             stop_iso = e["time"]
-        if raining and tp < PRECIP_THRESHOLD_MM:
+        if raining and not wet:
             done = True
 
     if start_iso is None:
@@ -403,7 +430,11 @@ def _wind_direction_sv(degrees: float | None) -> str:
 
 
 def _relative_when_sv(iso: str | None) -> str:
-    """Relative time phrase matching premium weather report style."""
+    """Relative time phrase matching premium weather report style.
+
+    Day parts: natt 00–06, morgon/bitti 06–09, förmiddag 09–12,
+    eftermiddag 12–18, kväll 18–24. 06:00 is *not* förmiddag.
+    """
     if not iso:
         return ""
     dt = dt_util.parse_datetime(iso)
@@ -414,33 +445,36 @@ def _relative_when_sv(iso: str | None) -> str:
     days = (dtl.date() - today).days
     h = dtl.hour
     hh = dtl.strftime("%H")
-    wd = ["måndag", "tisdag", "onsdag", "torsdag", "fredag", "lördag", "söndag"][
-        dtl.weekday()
-    ]
-    if h < 6:
-        if days == 0:
-            return f"i natt klockan {hh}"
-        if days == 1:
-            return f"i morgon natt klockan {hh}"
-        return f"på {wd} natt klockan {hh}"
-    if h < 12:
-        if days == 0:
-            return f"på förmiddag klockan {hh}"
-        if days == 1:
-            return f"i morgon förmiddag klockan {hh}"
-        return f"på {wd} förmiddag klockan {hh}"
-    if h < 18:
-        if days == 0:
-            return f"i eftermiddag klockan {hh}"
-        if days == 1:
-            return f"i morgon eftermiddag klockan {hh}"
-        return f"på {wd} eftermiddag klockan {hh}"
-    if days == 0:
-        return f"i kväll klockan {hh}"
-    if days == 1:
-        return f"i morgon kväll klockan {hh}"
-    return f"på {wd} kväll klockan {hh}"
+    wd = _WEEKDAYS_SV[dtl.weekday()]
 
+    if h < 6:
+        part = "natt"
+    elif h < 9:
+        part = "bitti"
+    elif h < 12:
+        part = "förmiddag"
+    elif h < 18:
+        part = "eftermiddag"
+    else:
+        part = "kväll"
+
+    if days == 0:
+        if part == "natt":
+            return f"i natt klockan {hh}"
+        if part == "bitti":
+            return f"på morgonen klockan {hh}"
+        if part == "kväll":
+            return f"i kväll klockan {hh}"
+        return f"på {part}en klockan {hh}"
+    if days == 1:
+        if part == "bitti":
+            return f"i morgon bitti klockan {hh}"
+        if part == "natt":
+            return f"i morgon natt klockan {hh}"
+        return f"i morgon {part} klockan {hh}"
+    if part == "bitti":
+        return f"på {wd} bitti klockan {hh}"
+    return f"på {wd} {part} klockan {hh}"
 
 
 _MONTHS_SV = {
@@ -1078,16 +1112,14 @@ class SmhiLocalCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     max_tstm = max(max_tstm, 80.0)
                     max_tstm_time = e["time"]
 
-            # Next precipitation (template: first future point with pmean >= 0.1)
+            # Next real precipitation – see _precip_event_value() for why the
+            # ensemble mean alone is not enough.
             if not found_precip and ts >= now_ts:
-                try:
-                    pmean = float(d.get("precipitation_amount_mean") or 0)
-                except (TypeError, ValueError):
-                    pmean = 0.0
-                if pmean >= PRECIP_THRESHOLD_MM:
+                amount = _precip_event_value(d)
+                if amount is not None:
                     found_precip = True
                     result["next_precip_type"] = _precip_type_label(d)
-                    result["next_precip_amount"] = round(pmean, 2)
+                    result["next_precip_amount"] = round(amount, 2)
                     result["next_precip_time_iso"] = e["time"]
                     result["next_snow_share"] = _snow_share_text(d)
 
